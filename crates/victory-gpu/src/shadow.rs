@@ -2220,7 +2220,7 @@ static LET_GO: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 #[cfg(feature = "diagnostics")]
 pub(crate) fn windows() -> [u64; 3] {
     let asked: u64 = {
-        let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
         loose
             .values()
             .map(|s| {
@@ -2244,7 +2244,7 @@ pub(crate) fn windows() -> [u64; 3] {
 #[cfg(feature = "diagnostics")]
 pub(crate) fn window_use() -> [u64; 8] {
     let mut out = [0u64; 8];
-    let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
     for s in loose.values() {
         let copied = s.copied.lock().unwrap_or_else(|e| e.into_inner());
         let pages = copied.iter().filter(|&&at| at != 0).count() as u64;
@@ -2285,7 +2285,7 @@ pub(crate) fn let_go_idle() {
     let gone: Vec<Arc<Shadow>> = {
         // Held from the look to the removal: `loose` hands a copy out
         // under the same lock, so none is handed out in between.
-        let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
         if map.is_empty() {
             return;
         }
@@ -2322,7 +2322,7 @@ pub(crate) fn let_go_idle() {
 #[cfg(feature = "diagnostics")]
 pub(crate) fn memory() -> [u64; 6] {
     let (windows, window_bytes) = {
-        let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
         // Each copy once: a window may stand under several keys.
         let mut seen = std::collections::HashSet::new();
         let bytes: u64 = loose
@@ -3863,7 +3863,7 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
     let end = at.saturating_add(len);
     let mut gone: Vec<Arc<Shadow>> = Vec::new();
     {
-        let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
         let keys: Vec<(u64, u64)> = map
             .range((at.saturating_sub(WINDOW), 0)..(end, 0))
             .filter(|(key, shadow)| shadow.place.is_some() && key.0 + key.1 > at)
@@ -3892,7 +3892,7 @@ pub(crate) fn in_place_let_go(at: u64, len: u64) -> u64 {
 /// bytes, true).
 pub(crate) fn spans() -> Vec<(u64, u64, bool)> {
     let mut spans: Vec<(u64, u64, bool)> = buffers().iter().map(|(key, entry)| (key.0, entry.end - key.0, false)).collect();
-    let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
     spans.extend(loose.keys().map(|&(start, len)| (start, len, true)));
     spans
 }
@@ -3929,6 +3929,10 @@ pub(crate) fn find_any(address: u64, len: u64) -> Option<Arc<Shadow>> {
     lookup(address, len, true)
 }
 
+/// Serializes the making of buffers' copies ([`lookup`]), so that the host
+/// buffer is made outside [`BUFFERS`]' lock and still only once.
+static MAKING_BUFFER: Mutex<()> = Mutex::new(());
+
 fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
     let end = address.checked_add(len.max(1))?;
     let enclosing = |map: &BTreeMap<(u64, usize), Entry>| {
@@ -3946,29 +3950,27 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
             return Some(shadow.clone());
         }
     }
-    let mut map = buffers();
-    let key = map
-        .range(..=(address, usize::MAX))
-        .rev()
-        .take(64)
-        .find(|(_, e)| e.end >= end)
-        .map(|(k, _)| *k);
-    let Some(key) = key else {
-        drop(map);
-        return loose(address, end, len <= 1, any);
-    };
-    let entry = map.get_mut(&key)?;
-    if entry.shadow.is_none() {
-        let len = entry.end - key.0;
-        // Rounded up so that views ending in the buffer's last 256 bytes fit.
-        // Shaders write some buffers (unordered access), so not upload memory.
-        let size = len.next_multiple_of(1 << 16);
-        // In place, if asked for and the memory can be opened
-        // (`crate::inplace::place_for`): the buffer is the title's own
-        // memory. Not the big ones `cards` puts in the card's memory: those
-        // are read too often to stay in the PC's.
+    // The copy is to be made. Its host buffer is made outside the table's
+    // lock (after fxceless #1053): making a committed buffer is a driver
+    // call of milliseconds, and under the exclusive lock every recording
+    // thread that looked a copy up waited for it. One maker at a time, so
+    // that a copy is still made once.
+    let making = MAKING_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+    let (key, buf_len, folds) = {
+        let mut map = buffers();
+        let Some(key) = enclosing(&map) else {
+            drop(map);
+            drop(making);
+            return loose(address, end, len <= 1, any);
+        };
+        let entry = map.get_mut(&key)?;
+        if entry.shadow.is_some() {
+            return entry.shadow.clone();
+        }
+        let buf_len = entry.end - key.0;
+        let size = buf_len.next_multiple_of(1 << 16);
         let big = cards() && size >= card_limits().0;
-        // Folded (`VICTORY_FOLD_BUFFERS=1`): a small buffer inside one
+        // Folded (`VICTORY_FOLD_BUFFERS`): a small buffer inside one
         // window cell takes the cell's window as its copy, so that the
         // buffer and the memory around it, which the title also reaches by
         // address, are one copy. Two copies of the same bytes made every
@@ -3977,71 +3979,117 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
         // world, for 10-40 KB each (a 6.4 KB ring and a 465 KB buffer
         // inside 4 MiB windows). One copy's own pending writes are left
         // alone by its refresh and need no such wait.
-        if !big && fold_buffers() && !fine() && key.0 & !(WINDOW - 1) == (entry.end - 1) & !(WINDOW - 1) {
-            if let Some(window) = loose(key.0, entry.end, false, false) {
-                if FOLDED.fetch_add(1, Ordering::Relaxed) < 24 {
-                    tracing::info!(
-                        start = format_args!("{:#x}", key.0),
-                        len,
-                        "a buffer's copy is its window's (VICTORY_FOLD_BUFFERS)"
-                    );
-                }
-                entry.shadow = Some(window);
-                return entry.shadow.clone();
-            }
-        }
-        if !big && let Some(placed) = crate::inplace::place_for(key.0, len, false) {
-            entry.shadow = Some(Arc::new(Shadow::placed(placed, key.0, len, false)));
+        let folds = !big && fold_buffers() && !fine() && key.0 & !(WINDOW - 1) == (entry.end - 1) & !(WINDOW - 1);
+        // In place, if asked for and the memory can be opened
+        // (`crate::inplace::place_for`): the buffer is the title's own
+        // memory. Not the big ones `cards` puts in the card's memory: those
+        // are read too often to stay in the PC's. Under the lock, as
+        // `in_place_let_go` takes what is in place out under it.
+        if !big && !folds && let Some(placed) = crate::inplace::place_for(key.0, buf_len, false) {
+            entry.shadow = Some(Arc::new(Shadow::placed(placed, key.0, buf_len, false)));
             return entry.shadow.clone();
         }
-        let (buffer, data) = host()?.shared_buffer(size)?;
-        crate::host::name(&buffer, || format!("title buffer {:#x}+{len:#x}", key.0));
-        // A big one, with `cards`: shaders get a buffer in the card's own
-        // memory, and the one just made is the CPU's side.
-        let (buffer, card) = match card_for(size) {
-            Some(on_card) => {
-                crate::host::name(&on_card, || format!("title buffer {:#x}+{len:#x} on the card", key.0));
+        (key, buf_len, folds)
+    };
+    let window = if folds { loose(key.0, key.0 + buf_len, false, false) } else { None };
+    let (built, own) = match window {
+        Some(window) => {
+            if FOLDED.fetch_add(1, Ordering::Relaxed) < 24 {
                 tracing::info!(
                     start = format_args!("{:#x}", key.0),
-                    len,
-                    "a buffer's host copy is in the card's memory"
+                    len = buf_len,
+                    "a buffer's copy is its window's (VICTORY_FOLD_BUFFERS)"
                 );
-                crate::census::copy_made(key.0, len);
-                let card = Card {
-                    staging: buffer,
-                    before: Mutex::default(),
-                    dirty: Mutex::default(),
-                    sent: Mutex::default(),
-                    size,
-                };
-                (on_card, Some(card))
             }
-            None => (buffer, None),
-        };
-        // SAFETY: a live buffer.
-        let gpu = unsafe { buffer.GetGPUVirtualAddress() };
-        if len >= 16 << 20 {
-            tracing::info!(
-                start = format_args!("{:#x}", key.0),
-                len,
-                "large buffer copied to the host"
-            );
-        } else {
-            tracing::debug!(
-                start = format_args!("{:#x}", key.0),
-                len,
-                "buffer copied to the host"
-            );
+            (window, false)
         }
-        let mut shadow = Shadow::new(buffer, data, gpu, key.0, len);
-        shadow.card = card;
-        let shadow = Arc::new(shadow);
-        if shadow.card.is_some() {
-            CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
+        None => (make_buffer_copy(key.0, buf_len)?, true),
+    };
+    let mut map = buffers();
+    match map.get_mut(&key) {
+        Some(entry) if entry.shadow.is_none() && entry.end - key.0 == buf_len => {
+            if own && built.card.is_some() {
+                CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&built));
+            }
+            entry.shadow = Some(built.clone());
+            Some(built)
         }
-        entry.shadow = Some(shadow);
+        // The title gave the buffer up while its copy was made.
+        _ => {
+            drop(map);
+            drop(making);
+            if own {
+                crate::host::retire(built);
+            }
+            lookup_again(address, len, any)
+        }
     }
-    entry.shadow.clone()
+}
+
+/// [`lookup`] once more, after the buffer it found went while its copy
+/// was made (not a loop: a title that gives buffers up as fast as copies
+/// are made gets no copy for this ask).
+fn lookup_again(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
+    let end = address.checked_add(len.max(1))?;
+    {
+        let map = buffers_read();
+        let found = map.range(..=(address, usize::MAX)).rev().take(64).find(|(_, e)| e.end >= end);
+        match found {
+            Some((_, e)) => return e.shadow.clone(),
+            None => {}
+        }
+    }
+    loose(address, end, len <= 1, any)
+}
+
+/// The host copy of the title buffer at `start` of `len` bytes, made
+/// under no lock of the tables.
+fn make_buffer_copy(start: u64, len: u64) -> Option<Arc<Shadow>> {
+    // Rounded up so that views ending in the buffer's last 256 bytes fit.
+    // Shaders write some buffers (unordered access), so not upload memory.
+    let size = len.next_multiple_of(1 << 16);
+    let (buffer, data) = host()?.shared_buffer(size)?;
+    crate::host::name(&buffer, || format!("title buffer {start:#x}+{len:#x}"));
+    // A big one, with `cards`: shaders get a buffer in the card's own
+    // memory, and the one just made is the CPU's side.
+    let (buffer, card) = match card_for(size) {
+        Some(on_card) => {
+            crate::host::name(&on_card, || format!("title buffer {start:#x}+{len:#x} on the card"));
+            tracing::info!(
+                start = format_args!("{start:#x}"),
+                len,
+                "a buffer's host copy is in the card's memory"
+            );
+            crate::census::copy_made(start, len);
+            let card = Card {
+                staging: buffer,
+                before: Mutex::default(),
+                dirty: Mutex::default(),
+                sent: Mutex::default(),
+                size,
+            };
+            (on_card, Some(card))
+        }
+        None => (buffer, None),
+    };
+    // SAFETY: a live buffer.
+    let gpu = unsafe { buffer.GetGPUVirtualAddress() };
+    if len >= 16 << 20 {
+        tracing::info!(
+            start = format_args!("{start:#x}"),
+            len,
+            "large buffer copied to the host"
+        );
+    } else {
+        tracing::debug!(
+            start = format_args!("{start:#x}"),
+            len,
+            "buffer copied to the host"
+        );
+    }
+    let mut shadow = Shadow::new(buffer, data, gpu, start, len);
+    shadow.card = card;
+    Some(Arc::new(shadow))
 }
 
 /// Whether small title buffers inside one window cell share the cell's
@@ -4166,7 +4214,7 @@ fn fine() -> bool {
 /// which is copied once for each.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn window_cover() -> u64 {
-    let loose = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
+    let loose = LOOSE.read().unwrap_or_else(|e| e.into_inner());
     cover(loose.keys().copied())
 }
 
@@ -4197,25 +4245,31 @@ fn longest_tail(windows: impl Iterator<Item = (u64, u64)>, address: u64, end: u6
 }
 
 /// Copies of title memory outside buffers, by (start, length).
-static LOOSE: Mutex<BTreeMap<(u64, u64), Arc<Shadow>>> = Mutex::new(BTreeMap::new());
+static LOOSE: std::sync::RwLock<BTreeMap<(u64, u64), Arc<Shadow>>> = std::sync::RwLock::new(BTreeMap::new());
+
+/// Serializes the making of windows ([`loose`]), so that the host buffer
+/// is made outside [`LOOSE`]'s lock and still only once.
+static MAKING_WINDOW: Mutex<()> = Mutex::new(());
 
 fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Shadow>> {
-    let mut map = LOOSE.lock().unwrap_or_else(|e| e.into_inner());
     let (cell, _) = window_of(address, end, WINDOW);
     let named = window_of(address, end, if unsized_ask { WINDOW } else { window() });
-    let (start, len) = if unsized_ask && tails() {
-        let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
-        longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
-    } else if any && fine() && !unsized_ask {
-        // The windows that begin in the ask's cell at or below the ask (one
-        // that begins in a cell below and reaches this far is passed over:
-        // the ask then makes its own).
-        let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
-        holder(there, address, end).unwrap_or(named)
-    } else {
-        named
+    let pick = |map: &BTreeMap<(u64, u64), Arc<Shadow>>| {
+        if unsized_ask && tails() {
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            longest_tail(there, address, end).unwrap_or_else(|| tail_of(address, end))
+        } else if any && fine() && !unsized_ask {
+            // The windows that begin in the ask's cell at or below the ask (one
+            // that begins in a cell below and reaches this far is passed over:
+            // the ask then makes its own).
+            let there = map.range((cell, 0)..=(address, u64::MAX)).map(|(key, _)| *key);
+            holder(there, address, end).unwrap_or(named)
+        } else {
+            named
+        }
     };
-    // Under the lock, with the handing out: see `let_go_idle`.
+    // Under the lock (shared or not), with the handing out: see
+    // `let_go_idle`, which takes it whole.
     let note = |shadow: &Shadow| {
         shadow.used.store(crate::host::moment(), Ordering::Relaxed);
         shadow.asked[0].fetch_min(address, Ordering::Relaxed);
@@ -4224,18 +4278,37 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
             shadow.unsized_asks.fetch_add(1, Ordering::Relaxed);
         }
     };
-    if let Some(shadow) = map.get(&(start, len)) {
-        note(shadow);
-        return Some(shadow.clone());
+    // Nearly every ask finds its window made: readers share the table
+    // (after fxceless #1053; as a mutex every recording thread's every
+    // ask outside a buffer took turns here).
+    {
+        let map = LOOSE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(shadow) = map.get(&pick(&map)) {
+            note(shadow);
+            return Some(shadow.clone());
+        }
     }
-    // In place, if asked for and the window's memory can be opened: the
-    // window is the title's own memory, with nothing to copy.
-    if let Some(placed) = crate::inplace::place_for(start, len, true) {
-        let shadow = Arc::new(Shadow::placed(placed, start, len, true));
-        note(&shadow);
-        map.insert((start, len), shadow.clone());
-        return Some(shadow);
-    }
+    // One maker at a time; the host buffer is made under no lock of the
+    // table, so that asks for other windows go on meanwhile.
+    let _making = MAKING_WINDOW.lock().unwrap_or_else(|e| e.into_inner());
+    let (start, len) = {
+        let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
+        let key = pick(&map);
+        if let Some(shadow) = map.get(&key) {
+            note(shadow);
+            return Some(shadow.clone());
+        }
+        // In place, if asked for and the window's memory can be opened: the
+        // window is the title's own memory, with nothing to copy. Under the
+        // lock, as `in_place_let_go` takes what is in place out under it.
+        if let Some(placed) = crate::inplace::place_for(key.0, key.1, true) {
+            let shadow = Arc::new(Shadow::placed(placed, key.0, key.1, true));
+            note(&shadow);
+            map.insert(key, shadow.clone());
+            return Some(shadow);
+        }
+        key
+    };
     let (buffer, data) = host()?.shared_buffer(len)?;
     crate::host::name(&buffer, || format!("title memory {start:#x}+{len:#x}"));
     // With room for windows on the card (`window_card_most`): shaders get a
@@ -4268,6 +4341,8 @@ fn loose(address: u64, end: u64, unsized_ask: bool, any: bool) -> Option<Arc<Sha
     if shadow.card.is_some() {
         CARDED.lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shadow));
     }
+    // Only makers insert, and this is the one: the key is still free.
+    let mut map = LOOSE.write().unwrap_or_else(|e| e.into_inner());
     note(&shadow);
     map.insert((start, len), shadow.clone());
     Some(shadow)
@@ -4388,7 +4463,7 @@ pub(crate) fn near(va: u64) -> String {
         .collect();
     all.extend(
         LOOSE
-            .lock()
+            .read()
             .unwrap_or_else(|e| e.into_inner())
             .values()
             .map(|s| (s.gpu, s.start, s.len)),

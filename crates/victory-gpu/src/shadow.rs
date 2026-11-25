@@ -3983,7 +3983,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
                     tracing::info!(
                         start = format_args!("{:#x}", key.0),
                         len,
-                        "a buffer's copy is its window's (VICTORY_FOLD_BUFFERS=1)"
+                        "a buffer's copy is its window's (VICTORY_FOLD_BUFFERS)"
                     );
                 }
                 entry.shadow = Some(window);
@@ -4045,10 +4045,12 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
 }
 
 /// Whether small title buffers inside one window cell share the cell's
-/// window as their copy (`VICTORY_FOLD_BUFFERS=1`; off by default).
+/// window as their copy (on by default; `VICTORY_FOLD_BUFFERS=0` gives
+/// each its own copy as before). Measured in the world (4090, same load):
+/// 179.2 -> 160.1 ms a frame, settles 4.5 -> 1.0 a frame.
 fn fold_buffers() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_FOLD_BUFFERS").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FOLD_BUFFERS").is_none_or(|v| v != "0"))
 }
 
 /// Buffers folded into windows so far ([`fold_buffers`]).

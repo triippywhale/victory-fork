@@ -106,32 +106,15 @@ pub(crate) fn long_ago(moment: u64, ms: u64, frames: u64) -> bool {
     (now >> 32).saturating_sub(moment >> 32) >= frames && tenths * 100 >= ms
 }
 
-/// Host `(available physical RAM, available commit charge)` in bytes, from
-/// `GlobalMemoryStatusEx`.
-fn memory_status() -> Option<(u64, u64)> {
+/// Available physical RAM on the host in bytes, from `GlobalMemoryStatusEx`.
+pub(crate) fn available_physical_ram() -> Option<u64> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     // SAFETY: plain data the call fills in.
     let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
     m.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
     // SAFETY: a sized structure.
     let ok = unsafe { GlobalMemoryStatusEx(&mut m) } != 0;
-    ok.then_some((m.ullAvailPhys, m.ullAvailPageFile))
-}
-
-/// Available physical RAM on the host in bytes, from `GlobalMemoryStatusEx`.
-pub(crate) fn available_physical_ram() -> Option<u64> {
-    memory_status().map(|(phys, _)| phys)
-}
-
-/// Remaining Windows commit charge (`ullAvailPageFile`) in bytes.
-pub(crate) fn available_commit_ram() -> Option<u64> {
-    memory_status().map(|(_, commit)| commit)
-}
-
-/// What staging and shadow buffers may use: the lower of available physical
-/// RAM and commit headroom, since both run out (fxceless #822).
-pub(crate) fn available_cache_ram() -> Option<u64> {
-    memory_status().map(|(phys, commit)| phys.min(commit))
+    ok.then_some(m.ullAvailPhys)
 }
 
 /// Effective idle timeout (in milliseconds) for VRAM-backed host textures,
@@ -7685,7 +7668,7 @@ impl HostList {
 }
 
 /// Whether a submission's refreshes of host copies run on several threads,
-/// a copy to a thread (`VICTORY_WIDE_REFRESH=0` disables it; `=1` forces it).
+/// a copy to a thread (`VICTORY_WIDE_REFRESH=1`; off by default).
 ///
 /// A submission brings some sixty copies up to date, one after the other
 /// on the submitting thread: for each, the pages the title wrote are asked
@@ -7698,36 +7681,7 @@ impl HostList {
 /// they are for the title's threads.
 fn wide_refresh() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        wide_refresh_enabled(
-            std::env::var("VICTORY_WIDE_REFRESH").ok().as_deref(),
-            std::thread::available_parallelism().ok().map(|n| n.get()),
-        )
-    })
-}
-
-fn wide_refresh_enabled(setting: Option<&str>, logical_cpus: Option<usize>) -> bool {
-    match setting {
-        Some("1") => true,
-        Some("0") => false,
-        _ => logical_cpus.is_some_and(|n| n >= 4),
-    }
-}
-
-#[cfg(test)]
-mod wide_refresh_tests {
-    use super::wide_refresh_enabled;
-
-    #[test]
-    fn parallel_refresh_is_default_on_multicore_and_can_be_overridden() {
-        assert!(wide_refresh_enabled(None, Some(4)));
-        assert!(wide_refresh_enabled(None, Some(16)));
-        assert!(!wide_refresh_enabled(None, Some(2)));
-        assert!(!wide_refresh_enabled(None, None));
-        assert!(wide_refresh_enabled(Some("1"), Some(1)));
-        assert!(!wide_refresh_enabled(Some("0"), Some(16)));
-        assert!(wide_refresh_enabled(Some("auto"), Some(4)));
-    }
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WIDE_REFRESH").is_some_and(|v| v == "1"))
 }
 
 /// A submission's refreshes not done yet, merged per buffer copy into
@@ -10054,4 +10008,3 @@ mod fills {
         }
     }
 }
-

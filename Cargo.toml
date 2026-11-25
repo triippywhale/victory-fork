@@ -81,12 +81,3 @@ codegen-units = 1
 # kept in its own folder so it does not evict the plain release build.
 [profile.diag]
 inherits = "release"
-
-# The build to hand to players: release with link-time optimisation across
-# the whole crate graph and one codegen unit, so the compiler can inline and
-# specialise across crate boundaries. Compiles several times slower than
-# release; the feature set and outputs are unchanged.
-[profile.ship]
-inherits = "release"
-lto = "fat"
-codegen-units = 1

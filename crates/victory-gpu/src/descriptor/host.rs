@@ -27,6 +27,13 @@ pub(crate) struct HostHeap {
     sampler: bool,
     /// The record (view index and generation) each slot was last made from.
     made: Mutex<Vec<u64>>,
+    /// What `made` holds for each slot once the slot is made and keeps
+    /// its resource, read without the lock by [`HostHeap::mirror`] (after
+    /// fxceless #1053): nearly every look finds its slot made from the
+    /// record the title still has there, and under one mutex per heap
+    /// the recording threads took turns for every descriptor they bound.
+    /// 0 while a slot is being made anew. Written under `made`'s lock.
+    made_seen: Vec<std::sync::atomic::AtomicU64>,
     /// The host resource each slot views, held while the slot does: shaders
     /// index heaps directly, so a slot the title has not rewritten since it
     /// released the resource may still be read, and a freed host resource
@@ -869,6 +876,7 @@ impl HostHeap {
             dynamic: extra,
             sampler,
             made: Mutex::new(vec![0; count as usize]),
+            made_seen: (0..count).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
             kept: Mutex::new(vec![None; (count + extra) as usize]),
             next: Mutex::new((0, vec![false; extra as usize])),
             free: std::sync::atomic::AtomicU32::new(extra),
@@ -1183,6 +1191,9 @@ impl HostHeap {
     /// Makes host slot `index` null again, as it is before its view is
     /// made: a null view of the kind it held.
     fn unmake(&self, made: &mut [u64], index: u32) {
+        if let Some(seen) = self.made_seen.get(index as usize) {
+            seen.store(0, std::sync::atomic::Ordering::Release);
+        }
         let Some(key) = made.get_mut(index as usize).map(std::mem::take) else {
             return;
         };
@@ -1590,7 +1601,31 @@ impl HostHeap {
         let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
         // Generations start at 1, so a made slot's key is never 0.
         let key = u64::from(generation) << 32 | u64::from(i);
+        // Made from this very record already, as nearly every look finds
+        // it: nothing to do, and no lock taken.
+        let seen = &self.made_seen[index as usize];
+        if tag == VIEW_TAG
+            && key != 0
+            && seen.load(std::sync::atomic::Ordering::Acquire) == key
+            && let Some(view) = view_at(i, generation)
+        {
+            return Some(view);
+        }
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
+        if made[index as usize] != key {
+            seen.store(0, std::sync::atomic::Ordering::Release);
+        }
+        let view = self.mirror_made(&mut made, index, handle, for_draw);
+        // Only now, with the slot written and its resource kept.
+        seen.store(made[index as usize], std::sync::atomic::Ordering::Release);
+        view
+    }
+
+    /// [`HostHeap::mirror`] under `made`'s lock.
+    fn mirror_made(&self, made: &mut [u64], index: u32, handle: u64, for_draw: bool) -> Option<View> {
+        // SAFETY: the handle is a descriptor slot in title memory.
+        let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        let key = u64::from(generation) << 32 | u64::from(i);
         let view = (tag == VIEW_TAG).then(|| view_at(i, generation)).flatten();
         let Some(view) = view else {
             // Not a view of ours (never written, or of a resource the
@@ -1611,7 +1646,7 @@ impl HostHeap {
             // let go of the host copies they held.
             for stale in self.note_buffer(index, Some(&view), for_draw) {
                 if stale != index {
-                    self.unmake(&mut made, stale);
+                    self.unmake(made, stale);
                 }
             }
             // A view of a texture object that has no host copy yet waits
@@ -1647,7 +1682,7 @@ impl HostHeap {
             if kept.is_none() && !self.sampler {
                 null_for(&view, self.cpu(index));
                 if !later {
-                    self.refused_for_now(&mut made, index, handle, &view);
+                    self.refused_for_now(made, index, handle, &view);
                 }
             }
             self.keep(index, kept.flatten());

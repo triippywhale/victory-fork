@@ -994,21 +994,27 @@ impl State {
     /// For a shader that reads title memory by address
     /// ([`crate::memory`]): its directory, fault notes and view slots,
     /// with the pages of the root views the list has set made ready.
-    fn memory_ready(&self, list: &HostList, compute: bool, writes: bool) -> Option<crate::memory::Ready> {
+    fn memory_ready(&self, list: &HostList, compute: bool, writes: bool, srvs: &[u8]) -> Option<crate::memory::Ready> {
         let heap = match self.heaps[0] {
             0 => None,
             h => crate::descriptor::heap(h as This).host(),
         }?;
-        let (mut addresses, mut constants) = (Vec::new(), Vec::new());
-        for root in self.roots_ref(compute) {
+        let (mut addresses, mut constants, mut records) = (Vec::new(), Vec::new(), Vec::new());
+        for (slot, root) in self.roots_ref(compute).iter().enumerate() {
             match root {
-                Root::View(address) => addresses.push(*address),
+                Root::View(address) => {
+                    addresses.push(*address);
+                    // (the title's root SRVs the shader reads: records it may take addresses from)
+                    if u8::try_from(slot).is_ok_and(|s| srvs.contains(&s)) {
+                        records.push(*address);
+                    }
+                }
                 Root::Constants(values) => constants.extend_from_slice(values),
                 _ => {}
             }
         }
         let builder = crate::pipeline::is_builder(self.pipeline as This);
-        crate::memory::ready(list, heap, &addresses, &constants, writes, builder)
+        crate::memory::ready(list, heap, &addresses, &constants, &records, writes, builder)
     }
 
     /// The bound heap holding `handle`.
@@ -1226,7 +1232,7 @@ impl State {
                     let _phase = BindPhase::start(BIND_MEMORY);
                     // Declared written only by a shader that stores by
                     // address: a walker stores its results through views.
-                    self.memory_ready(list, compute, writes && t.stores_by_address)
+                    self.memory_ready(list, compute, writes && t.stores_by_address, &t.host.root_srvs)
                 };
                 let Some(ready) = ready else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");

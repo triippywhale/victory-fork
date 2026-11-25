@@ -328,6 +328,21 @@ impl Memory {
     }
 }
 
+/// Bytes of a block of list upload memory looked through for title
+/// addresses, from a root SRV's address on: some 340 geometry descriptions.
+const SCAN: u64 = 16 << 10;
+
+/// The 8-byte values of `bytes` (from an 8-byte boundary) that are title
+/// addresses as the builder writes them: bits 32 to 39 set, nothing above,
+/// and a low dword of 64 KiB or more (as for an address in two constants;
+/// an address that is not the title's memory is refused when named).
+fn title_addresses(bytes: &[u8]) -> impl Iterator<Item = u64> + '_ {
+    bytes.chunks_exact(8).filter_map(|q| {
+        let v = u64::from_le_bytes(q.try_into().ok()?);
+        ((1..=0xFF).contains(&(v >> 32)) && v as u32 >= 0x1_0000).then_some(v)
+    })
+}
+
 /// Before a draw whose shader reads title memory by address: what its
 /// root arguments name gets its copies (`addresses`: its root views;
 /// `constants`: its root constants, see the module), every numbered copy
@@ -339,6 +354,7 @@ pub(crate) fn ready(
     heap: &HostHeap,
     addresses: &[u64],
     constants: &[u32],
+    records: &[u64],
     writes: bool,
     builder: bool,
 ) -> Option<Ready> {
@@ -359,17 +375,56 @@ pub(crate) fn ready(
     for &address in addresses {
         m.name(address, &mut named);
     }
+    // List upload memory (`crate::list::upload`, there only with the
+    // title's builder asked for): the builder reaches it through pointers
+    // it reads out of its root views. A chunk is a window; once numbered
+    // it stays so (fxceless 2d95091e).
+    #[cfg(windows)]
+    if let Some((start, len)) = crate::list::upload::span() {
+        for chunk in (start..start + len).step_by(crate::list::upload::CHUNK) {
+            let _ = m.map(chunk);
+        }
+    }
+    // Title addresses in the blocks of list upload memory a dispatch reads
+    // through its root SRVs (fxceless 273fc655): the builder's leaf
+    // rehydration takes its geometry (index and vertex buffers) by address
+    // out of its 48-byte records there, which no root argument names; the
+    // ones in no copy when the stage ran read zeros (leaves without
+    // triangles). The builder fills the records before it records the
+    // dispatch. Looked through up to what the list has handed out,
+    // [`SCAN`] bytes at most.
+    #[cfg(windows)]
+    for &address in records {
+        let Some(handed) = crate::list::upload::handed_end(address) else {
+            continue;
+        };
+        let from = address & !7;
+        let end = handed.min(address.saturating_add(SCAN));
+        if end <= from {
+            continue;
+        }
+        let mut bytes = vec![0u8; (end - from) as usize];
+        if crate::host::read_into(from as *const u8, &mut bytes) {
+            for pointer in title_addresses(&bytes) {
+                m.name(pointer, &mut named);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = records;
     // A title address in two constants (low dword, then bits 32 to 39), or
     // in one in 256-byte units. A constant that only looks like one names
     // memory nothing reads; one that is not the title's memory is refused.
+    // The low dword of a pair is not taken in 256-byte units as well: of
+    // the windows the builder's dispatches named that way, 717 of 802 in
+    // its first frame were such low dwords (fxceless 2d95091e).
     for (i, &c) in constants.iter().enumerate() {
         if let Some(&high) = constants.get(i + 1)
             && (1..=0xFF).contains(&high)
             && c >= 0x1_0000
         {
             m.name(u64::from(c) | u64::from(high) << 32, &mut named);
-        }
-        if c >= 0x0100_0000 {
+        } else if c >= 0x0100_0000 {
             m.name(u64::from(c) << 8, &mut named);
         }
     }
@@ -508,6 +563,19 @@ mod tests {
     use crate::object::{S_OK, This, guid};
 
     #[test]
+    fn title_addresses_are_found_in_geometry_records() {
+        // A geometry description as the builder copies it into upload memory
+        // (48 bytes): no transform, index and vertex formats, counts, the
+        // index buffer, the vertex buffer and its stride.
+        let mut record = Vec::new();
+        for v in [0u64, 0x10_0000_0035, 0x508_0000_1263, 0xb_13f6_53a0, 0xb_13f0_8bc0, 8] {
+            record.extend_from_slice(&v.to_le_bytes());
+        }
+        let found: Vec<u64> = title_addresses(&record).collect();
+        assert_eq!(found, [0xb_13f6_53a0, 0xb_13f0_8bc0]);
+    }
+
+    #[test]
     fn dropping_a_view_heap_evicts_its_memory_heaps_entry() {
         let Some(host) = crate::host::host() else {
             return;
@@ -530,7 +598,7 @@ mod tests {
         let host_heap = heap(h).host().expect("host view heap");
         let key = std::ptr::from_ref(host_heap) as usize;
 
-        assert!(ready(&list, host_heap, &[], &[], false, false).is_some());
+        assert!(ready(&list, host_heap, &[], &[], &[], false, false).is_some());
         {
             let guard = MEMORY.lock().unwrap();
             assert!(guard.as_ref().unwrap().heaps.contains_key(&key));

@@ -1770,7 +1770,9 @@ impl Uploads {
         let offset = self.used.next_multiple_of(align);
         self.used = offset + size;
         // (Chunks start at multiples of their size, so of `align`.)
-        Some((self.chunks.last()?.at() + offset) as *mut u8)
+        let at = self.chunks.last()?.at() + offset;
+        upload::handed(at + size);
+        Some(at as *mut u8)
     }
 
     #[cfg(test)]
@@ -1802,6 +1804,7 @@ impl Uploads {
 #[cfg(windows)]
 pub(crate) mod upload {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use windows_sys::Win32::System::Memory::{
         MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_RESERVE,
@@ -1836,10 +1839,14 @@ pub(crate) mod upload {
         /// serves then, out of shaders' reach).
         pub(crate) fn take() -> Option<Chunk> {
             let mut region = REGION.lock().unwrap_or_else(|e| e.into_inner());
-            let r = region.get_or_insert_with(|| Region {
-                base: reserve().unwrap_or(0),
-                next: 0,
-                free: Vec::new(),
+            let r = region.get_or_insert_with(|| {
+                let base = reserve().unwrap_or(0);
+                BASE.store(base, Ordering::Relaxed);
+                Region {
+                    base,
+                    next: 0,
+                    free: Vec::new(),
+                }
             });
             if r.base == 0 {
                 return None;
@@ -1873,10 +1880,43 @@ pub(crate) mod upload {
 
     impl Drop for Chunk {
         fn drop(&mut self) {
+            if let Some(i) = place(self.0) {
+                USED[i].store(0, Ordering::Relaxed);
+            }
             if let Some(r) = REGION.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                 r.free.push(self.0);
             }
         }
+    }
+
+    /// The reservation's start, once made (0 before).
+    static BASE: AtomicUsize = AtomicUsize::new(0);
+    /// Per chunk, by its place in the reservation: the bytes from its start
+    /// handed out so far by the list that holds it.
+    static USED: [AtomicUsize; CHUNKS] = [const { AtomicUsize::new(0) }; CHUNKS];
+
+    /// The place of the chunk holding `address` in the reservation.
+    fn place(address: usize) -> Option<usize> {
+        let base = BASE.load(Ordering::Relaxed);
+        let i = address.checked_sub(base)? / CHUNK;
+        (base != 0 && i < CHUNKS).then_some(i)
+    }
+
+    /// Bytes up to `end` of a chunk were handed out.
+    pub(crate) fn handed(end: usize) {
+        if let Some(i) = place(end.saturating_sub(1)) {
+            USED[i].fetch_max(end - (BASE.load(Ordering::Relaxed) + i * CHUNK), Ordering::Relaxed);
+        }
+    }
+
+    /// Where what was handed out of the chunk holding `address` ends, if
+    /// `address` lies in it: a bound for the block a root view points into
+    /// (the blocks after it in the chunk are the same list's).
+    pub(crate) fn handed_end(address: u64) -> Option<u64> {
+        let address = usize::try_from(address).ok()?;
+        let i = place(address)?;
+        let end = BASE.load(Ordering::Relaxed) + i * CHUNK + USED[i].load(Ordering::Relaxed);
+        (address < end).then_some(end as u64)
     }
 
     /// The chunks committed so far, held or free: start and bytes.
@@ -2754,10 +2794,14 @@ mod tests {
         // Where shaders reach title memory by address; more than a chunk
         // comes from the heap.
         #[cfg(windows)]
-        {
+        if crate::pipeline::builder_wanted() {
             assert!((1 << 32..(victory_shader::emit::MEMORY_PAGES as usize) << 16).contains(&(p as usize)));
             let q = allocate_upload(list, 24, 16);
             assert_eq!(q as usize, p as usize + 48, "carved from the same chunk");
+            // (how far the chunk was handed out, which bounds the block a root view points
+            // into when the title addresses in it are looked for: `crate::memory`)
+            assert_eq!(upload::handed_end(p as u64 + 8), Some(q as u64 + 24));
+            assert_eq!(upload::handed_end(q as u64 + 24), None, "past what was handed out");
             assert!(!allocate_upload(list, 8 << 20, 16).is_null());
         }
         assert_eq!(reset(list, allocator, null), S_OK);

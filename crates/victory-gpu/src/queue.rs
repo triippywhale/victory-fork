@@ -710,6 +710,21 @@ extern "system" fn timestamp_frequency(_: This, out: *mut u64) -> HRESULT {
 }
 const TIMESTAMP_FREQUENCY: u64 = 100_000_000;
 
+/// Queue methods 0xa8 and 0xb0 (0xb8 and 0xc0 in the newer layout):
+/// `SuspendX(flags)` and `ResumeX()`, which a title calls around the
+/// console suspending it (the title calls the first once, late in a run,
+/// from title+0x24900a5). Nothing here is suspended: both succeed.
+/// shortcut: the console's suspend waits for the queue's submitted work;
+/// ours returns at once.
+extern "system" fn suspend(_: This, flags: u32) -> HRESULT {
+    tracing::info!(flags, "the title suspends its command queue (SuspendX): nothing to do");
+    S_OK
+}
+extern "system" fn resume(_: This) -> HRESULT {
+    tracing::info!("the title resumes its command queue (ResumeX): nothing to do");
+    S_OK
+}
+
 /// What a list's bottom-of-pipe write stores when the list has run.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Written {
@@ -967,7 +982,7 @@ extern "system" fn desc(this: This, out: *mut QueueDesc) {
 /// The queue methods by their slot in older titles' queues (the 2020-era
 /// layout): IUnknown 3, object 4, device child 1, queue 26 (12 as on PC,
 /// then console ones).
-const METHODS: [(usize, *const ()); 15] = [
+const METHODS: [(usize, *const ()); 17] = [
     (0, query as *const ()),
     (2, release as *const ()),
     (7, object::parent_device as *const ()), // 0x38
@@ -978,6 +993,8 @@ const METHODS: [(usize, *const ()); 15] = [
     (14, signal as *const ()),               // 0x70
     (15, wait as *const ()),                 // 0x78
     (16, timestamp_frequency as *const ()),  // 0x80
+    (21, suspend as *const ()),              // 0xa8 SuspendX
+    (22, resume as *const ()),               // 0xb0 ResumeX
     (26, desc as *const ()),                 // 0xd0
     (29, copy_page_mappings as *const ()),   // 0xe8 page mapping batch
     (30, present as *const ()),              // 0xf0

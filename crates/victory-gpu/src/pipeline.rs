@@ -482,7 +482,8 @@ fn builder_census() {
     for p in &b.pipelines {
         match make::missing(p) {
             None => made += 1,
-            Some(why) if why.ends_with("being made") => making += 1,
+            // (`make::missing`: "being made [shaders]")
+            Some(why) if why.starts_with("being made") => making += 1,
             Some(_) => refused += 1,
         }
     }

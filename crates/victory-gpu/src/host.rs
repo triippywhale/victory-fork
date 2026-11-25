@@ -5572,6 +5572,9 @@ impl Host {
     /// Runs closed lists and waits for them, and with [`late`] for
     /// everything sent to the card before them, which is settled first.
     pub(crate) fn execute(&self, runs: &[&HostList]) {
+        // Behind what the queues were given before it and have not run
+        // yet (`crate::queue::async_submit`).
+        crate::queue::before_sync();
         let _ = self.submit(runs, false);
     }
 

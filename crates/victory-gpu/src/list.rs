@@ -233,6 +233,16 @@ static IDLE: std::sync::Mutex<(Vec<Idle>, u64)> = std::sync::Mutex::new((Vec::ne
 #[cfg(windows)]
 const IDLE_MOST: (usize, u64) = (128, 256 << 20);
 
+/// The most idle host lists kept: [`IDLE_MOST`]'s, or 512 with
+/// `crate::queue::async_submit` (after fxceless f85101b: the title has its
+/// lists back at once and resets them while the flights of the frame
+/// before are still in the air, so more than 128 are out at a time and
+/// host lists were made and thrown away every frame).
+#[cfg(windows)]
+fn idle_most() -> usize {
+    if crate::queue::async_submit() { 512 } else { IDLE_MOST.0 }
+}
+
 /// Whether host lists that have run are used again (on by default;
 /// `VICTORY_LIST_POOL=0`: each is made new and thrown away, as before).
 #[cfg(windows)]
@@ -272,7 +282,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         // The descriptor slots and the upload memory its commands named.
         drop(_state);
         drop(_uploads);
-        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= IDLE_MOST.0 {
+        if !ran.contains(&i) || IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.len() >= idle_most() {
             continue;
         }
         // As the title's reset does: what the list kept for its commands
@@ -280,7 +290,7 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         host.reset();
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
-        if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {
+        if idle.0.len() < idle_most() && idle.1 + bytes <= IDLE_MOST.1 {
             idle.0.push(Idle(host, bytes));
             idle.1 += bytes;
         }

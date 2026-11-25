@@ -53,6 +53,11 @@ enum Held {
     Run(Vec<crate::list::Detached>, Vec<usize>),
     /// A signal of the queue's, due after what it holds before it.
     Signal(crate::fence::FenceRef, u64),
+    /// With [`async_submit`]: the submission at the head of the line is
+    /// being prepared and sent by our thread, with the line unlocked, so
+    /// the title can add to its end meanwhile; whatever is added stays
+    /// behind this (the line is not empty), signals too.
+    Running,
 }
 
 /// The queues that hold something (their addresses).
@@ -131,7 +136,7 @@ fn submit_cut(this: This, lists: &[This]) {
     let Some(host) = crate::host::host() else {
         return;
     };
-    let first = if lock(&queue(this).held).is_empty() {
+    let first = if !async_submit() && lock(&queue(this).held).is_empty() {
         lists
             .iter()
             .position(|&l| crate::list::cut_list(l))
@@ -313,10 +318,109 @@ static RELEASING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// (a list's bottom-of-pipe write may be into a fence), never inside one.
 #[cfg(windows)]
 pub(crate) fn release_held(force: bool) {
+    if !force && async_submit() {
+        // A thread of ours runs what is free to run.
+        wake();
+        return;
+    }
+    release_held_now(force);
+}
+
+/// Whether a submission is only put in its queue's line by the thread
+/// that submits it, and prepared and sent by a thread of ours
+/// (`VICTORY_ASYNC_SUBMIT=1`, off by default; needs flights and lists cut
+/// at their waits, both defaults). From fxceless/victory-fork f85101b
+/// (part of 3.5-4 -> 6-7 frames a second in the first room on an RTX
+/// 4070; PalmVIDev #271 runs it by default).
+///
+/// Why: the title's render thread is inside `execute` for most of a frame,
+/// preparing (the copies of title memory, the write watch, descriptors,
+/// textures) and waiting for flights, while its recording threads stand
+/// idle. The title's thread does nothing with the result of that work: it
+/// only has to be done before the lists run, in order.
+///
+/// With the switch a submission's lists are taken from the title's lists
+/// (as they already are when the queue holds anything) and put behind the
+/// queue's line; one thread of ours ([`worker`]) runs the line in order. A
+/// signal of the queue goes behind them, as it does behind anything held.
+/// Everything that must see earlier submissions done runs the line itself
+/// first: a present, and every submission of ours that is waited for
+/// ([`before_sync`]).
+///
+/// What it assumes: title memory a submission reads is not rewritten by
+/// the title between its submit call and the moment our thread prepares
+/// it, some milliseconds later. On the console the card reads that memory
+/// when it runs the list, later still, so a title that rewrote it earlier
+/// would be wrong there too.
+#[cfg(windows)]
+pub(crate) fn async_submit() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_ASYNC_SUBMIT").is_some_and(|v| v == "1") && crate::host::late() && cuts();
+        if on {
+            tracing::info!("submissions are prepared and sent by a thread of ours, not by the thread that submits (VICTORY_ASYNC_SUBMIT=1)");
+            let _ = std::thread::Builder::new().name("victory-submit".into()).spawn(worker);
+        }
+        on
+    })
+}
+
+/// Whether there is something for [`worker`] to look at.
+#[cfg(windows)]
+static WORK: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+#[cfg(windows)]
+fn wake() {
+    *lock(&WORK.0) = true;
+    WORK.1.notify_one();
+}
+
+/// The thread of [`async_submit`]: runs what queues hold as far as it is
+/// free to run, each time something was added or a fence moved.
+#[cfg(windows)]
+fn worker() {
+    loop {
+        {
+            let mut work = lock(&WORK.0);
+            while !*work {
+                work = WORK.1.wait(work).unwrap_or_else(|e| e.into_inner());
+            }
+            *work = false;
+        }
+        release_held_now(false);
+    }
+}
+
+#[cfg(windows)]
+thread_local! {
+    /// This thread is inside [`release_held_now`].
+    static RELEASING_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Before a submission of ours that is waited for, with [`async_submit`]:
+/// what the queues hold and is free to run runs first, on this thread, so
+/// the submission keeps its place behind them.
+#[cfg(windows)]
+pub(crate) fn before_sync() {
+    if async_submit() && !RELEASING_HERE.get() {
+        release_held_now(false);
+    }
+}
+
+#[cfg(windows)]
+fn release_held_now(force: bool) {
     if lock(&WAITING).is_empty() {
         return;
     }
     let _one = lock(&RELEASING);
+    let was_here = RELEASING_HERE.replace(true);
+    struct Leave(bool);
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            RELEASING_HERE.set(self.0);
+        }
+    }
+    let _leave = Leave(was_here);
     let mut forcing = false;
     loop {
         let queues = lock(&WAITING).clone();
@@ -326,11 +430,11 @@ pub(crate) fn release_held(force: bool) {
         let mut moved = false;
         for q in queues {
             // SAFETY: a live queue: one released is taken off the list.
-            let held = unsafe { &(*(q as *const Queue)).held };
-            let mut held = lock(held);
+            let line = unsafe { &(*(q as *const Queue)).held };
+            let mut held = lock(line);
             loop {
                 match held.first() {
-                    None => break,
+                    None | Some(Held::Running) => break,
                     Some(Held::Wait(fence, value))
                         if !forcing && crate::fence::completed(fence.as_this()) < *value =>
                     {
@@ -340,7 +444,7 @@ pub(crate) fn release_held(force: bool) {
                     Some(_) => {}
                 }
                 match held.remove(0) {
-                    Held::Wait(..) => {}
+                    Held::Wait(..) | Held::Running => {}
                     Held::Value(wait) => {
                         // Passed at a present without being met: what the
                         // queue stood at.
@@ -382,7 +486,20 @@ pub(crate) fn release_held(force: bool) {
                         {
                             // Not waited for: the host keeps the lists
                             // until they are settled.
-                            host.execute_late(lists, order);
+                            if async_submit() && !force {
+                                // The line is open while this part is
+                                // prepared and sent: only this thread takes
+                                // from its head (one releaser at a time).
+                                held.insert(0, Held::Running);
+                                drop(held);
+                                host.execute_late(lists, order);
+                                held = lock(line);
+                                if matches!(held.first(), Some(Held::Running)) {
+                                    held.remove(0);
+                                }
+                            } else {
+                                host.execute_late(lists, order);
+                            }
                         } else {
                             let ran = {
                                 let runs: Vec<&crate::host::HostList> =
@@ -795,14 +912,19 @@ extern "system" fn present(
     // and what that frees runs in its own order, before anything is forced.
     #[cfg(windows)]
     if crate::host::late() && !crate::host::late_free_present() {
+        // (With `async_submit`: what the queues hold runs here first, and
+        // what it sent is settled with the rest.)
+        if async_submit() {
+            release_held_now(false);
+        }
         crate::host::settle_for_present();
-        release_held(false);
+        release_held_now(false);
         crate::host::settle_for_present();
     }
     // Ready work runs first, including work that can follow an in-flight
     // memory write. The fallback runs whatever remains held at a present.
     #[cfg(windows)]
-    release_held(forces());
+    release_held_now(forces());
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
     if frame.is_power_of_two() {
         let (draws, dispatches) = crate::list::take_counts();

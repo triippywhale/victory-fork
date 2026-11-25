@@ -519,6 +519,16 @@ pub(crate) fn builder_off(why: &'static str) {
 /// shortcut: what the stages before the dropped one stored stays in title
 /// memory (unless `VICTORY_BVH_QUARANTINE=1`, where there is one): whole
 /// stages' results, but of a build that never finished.
+/// Whether the title's builder was asked for (`VICTORY_BVH_BUILDER`), which
+/// is what the parts that only serve it key on.
+#[cfg(windows)]
+pub(crate) fn builder_wanted() -> bool {
+    static WANTED: OnceLock<bool> = OnceLock::new();
+    *WANTED.get_or_init(|| {
+        matches!(std::env::var("VICTORY_BVH_BUILDER").as_deref(), Ok("1" | "2"))
+    })
+}
+
 #[cfg(windows)]
 pub(crate) fn builder_runs(this: Option<This>) -> bool {
     static ALLOWED: OnceLock<u8> = OnceLock::new();

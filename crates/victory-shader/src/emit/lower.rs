@@ -12983,7 +12983,15 @@ impl<'a> Lower<'a> {
 /// does (the title's BVH builder: atomics, then reads of what other groups
 /// wrote) has every UAV globally coherent: the host then makes a group's
 /// accesses see other groups' writes, which a plain view need not.
+///
+/// `VICTORY_COHERENT=0` leaves it to the accesses: only a view an access
+/// marks `glc` is coherent, as before fxceless #914, and no fence is made
+/// (to measure what the coherent views cost the card).
 pub(crate) fn wants_coherent(p: &crate::ir::Program) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_COHERENT").is_none_or(|v| v != "0")) {
+        return false;
+    }
     p.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
         let name = inst.name();
         let bits = match &inst.fields {

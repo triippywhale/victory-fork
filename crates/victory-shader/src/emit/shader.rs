@@ -539,8 +539,12 @@ impl Shader {
 
     /// Refactoring lets the host fuse a multiply and an add the console
     /// rounds apart (Intel UHD does); only `FMad` needs it, to fuse at all.
+    /// `VICTORY_REFACTOR=1` leaves refactoring to the host everywhere, as
+    /// before upstream #1856 (to measure what the flag costs the card).
     pub(crate) fn settle_flags(&mut self) {
-        if !self.fused {
+        static FREE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let free = *FREE.get_or_init(|| std::env::var_os("VICTORY_REFACTOR").is_some_and(|v| v == "1"));
+        if !self.fused && !free {
             self.flags |= flags::NO_REFACTORING;
         }
     }

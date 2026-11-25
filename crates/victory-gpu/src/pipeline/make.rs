@@ -763,6 +763,9 @@ mod tests {
         assert!(first_wait(&p, 7), "and may wait again within that frame");
         assert!(!first_wait(&p, 8), "a later frame does not wait");
         assert!(!first_wait(&p, 6));
+    }
+
+    #[test]
     fn commit_budget_throttles_workers_and_early_under_pressure() {
         const MIB: u64 = 1024 * 1024;
         const GIB: u64 = 1024 * MIB;

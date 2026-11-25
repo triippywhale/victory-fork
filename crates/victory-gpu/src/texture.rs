@@ -978,6 +978,26 @@ fn recheck_mips() -> bool {
 /// and only two slices of an array or cube map: a mip or slice that
 /// arrived after the upload elsewhere was not seen. Read through the
 /// kernel, so pages not there count as zeros.
+/// `VICTORY_HEAP_RECHECK_EVERY=<frames>`: a texture picked by index that
+/// was still unchanged at the last scheduled look (`draw::RECHECK_FRAMES`)
+/// is looked at again every that many frames (0, the default: never).
+/// From fxceless/victory-fork#956.
+pub(crate) fn recheck_every() -> u64 {
+    static EVERY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EVERY.get_or_init(|| std::env::var("VICTORY_HEAP_RECHECK_EVERY").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+}
+
+/// `VICTORY_HEAP_RECHECK_WHOLE_MB=<n>`: [`fingerprint`] reads memory of up
+/// to `n` MiB whole instead of windows (0, the default: none). A texture
+/// the title draws into piece by piece (a glyph cache, HUD prompts and
+/// subtitles) changes between the windows. From fxceless/victory-fork#956.
+fn recheck_whole_bytes() -> usize {
+    static WHOLE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WHOLE.get_or_init(|| {
+        std::env::var("VICTORY_HEAP_RECHECK_WHOLE_MB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0) << 20
+    })
+}
+
 pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
     const WINDOW: usize = 16 << 10;
     thread_local! {
@@ -996,6 +1016,14 @@ pub(crate) fn fingerprint(at: u64, len: u64, mips: &[(u64, u64)]) -> u64 {
         };
         if len <= 3 * WINDOW {
             take(0, len);
+        } else if len <= recheck_whole_bytes() {
+            // Whole, a window's worth at a time.
+            let mut from = 0;
+            while from < len {
+                let bytes = (3 * WINDOW).min(len - from);
+                take(from, bytes);
+                from += bytes;
+            }
         } else {
             take(0, WINDOW);
             take((len / 2) & !0xfff, WINDOW);

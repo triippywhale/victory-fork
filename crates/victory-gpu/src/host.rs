@@ -8663,12 +8663,16 @@ impl Meter {
                  {indirect:.0} indirect; heap buffers {picked:.1} passes {picked_ms:.1} ms ({picked_mode}: {picked_slots:.0} slots looked at {picked_look:.1} ms, \
                  {picked_copies:.0} copies refreshed {picked_refresh:.1} ms, textures {picked_tex:.1} ms), {picked_w:.1} lists storing through picked views ({picked_w_mb:.1} MB of marked views declared{picked_off}; {picked_marked} slots marked now, {picked_first} first marks and {picked_ro} marks on read-only views so far), {picked_late:.0} later refreshes; structure builder: {bvh_out:.1} MB of windows kept from title memory, {bvh_in:.1} MB in buffers declared;                  texture slots written so far: {placed} placed, {objects} of objects; \
                  textures picked by index: {picked_textures} uploaded so far ({picked_mb} MB), \
-                 {picked_waiting} waiting, {picked_away} passed over unmapped; depth textures with                  unordered access: {du0} made, bound as depth {du1}x, cleared as depth {du2}x,                  unordered views refused {du3}x; buffer views left null as the host would refuse them: {refused}",
+                 {picked_waiting} waiting, {picked_away} passed over unmapped, looked at again {picked_looks} times ({picked_changed} changed, {picked_changed_late} of them after the scheduled looks); depth textures with                  unordered access: {du0} made, bound as depth {du1}x, cleared as depth {du2}x,                  unordered views refused {du3}x; buffer views left null as the host would refuse them: {refused}",
                 picked_textures = crate::draw::HEAP_TEXTURES.load(Ordering::Relaxed),
                 picked_mb = crate::draw::HEAP_TEXTURE_BYTES.load(Ordering::Relaxed) >> 20,
                 picked_waiting = crate::draw::HEAP_TEXTURES_WAITING.load(Ordering::Relaxed),
                 picked_off = if crate::heap_marks::on() { "" } else { " but not copied back: VICTORY_HEAP_WRITES=0" },
                 picked_away = crate::draw::HEAP_TEXTURES_AWAY.load(Ordering::Relaxed),
+                picked_looks = crate::draw::HEAP_TEXTURES_RECHECKED[0].load(Ordering::Relaxed)
+                    + crate::draw::HEAP_TEXTURES_RECHECKED[1].load(Ordering::Relaxed),
+                picked_changed = crate::draw::HEAP_TEXTURES_RECHECKED[1].load(Ordering::Relaxed),
+                picked_changed_late = crate::draw::HEAP_TEXTURES_RECHECKED[2].load(Ordering::Relaxed),
                 du0 = crate::resource::DEPTH_UNORDERED[0].load(Ordering::Relaxed),
                 du1 = crate::resource::DEPTH_UNORDERED[1].load(Ordering::Relaxed),
                 du2 = crate::resource::DEPTH_UNORDERED[2].load(Ordering::Relaxed),

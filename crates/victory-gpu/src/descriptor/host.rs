@@ -293,19 +293,24 @@ fn stale_rule() -> Rule {
 /// locks held: this locks one mutex of its own and calls nothing.
 pub(crate) fn remapped(at: usize, len: usize) {
     use std::sync::atomic::Ordering::Relaxed;
-    /// Ranges kept until a pass takes them.
-    const MOST: usize = 1 << 15;
+    /// Ranges kept until a pass takes them. (A world's first minutes note
+    /// tens of thousands between two passes: 131,072 were dropped in one
+    /// run at the 32,768 there were; myokex 4436f8f1, also in JoshuuDev's
+    /// and Trexies' forks.)
+    const MOST: usize = 1 << 18;
     let (start, end) = (at as u64, at.saturating_add(len) as u64);
     if end <= SPANNED[0].load(Relaxed) || start >= SPANNED[1].load(Relaxed) {
         return;
     }
     let mut ranges = REMAPPED.lock().unwrap_or_else(|e| e.into_inner());
     STALE[1].fetch_add(1, Relaxed);
-    // Pages are mapped one after the other.
+    // Pages are mapped one after the other; a range that touches or
+    // overlaps the last joins it (as DexNom's record_remap).
     if let Some(last) = ranges.last_mut()
-        && last.1 == start
+        && last.0 <= end
+        && start <= last.1
     {
-        last.1 = end;
+        (last.0, last.1) = (last.0.min(start), last.1.max(end));
         return;
     }
     if ranges.len() >= MOST {

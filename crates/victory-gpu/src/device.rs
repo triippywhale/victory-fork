@@ -404,6 +404,31 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
             first_points_at = format_args!("{first:x?}"),
             "a pipeline creation method that is not implemented: the title goes without this pipeline"
         );
+        // What the description's (pointer, bytes) pairs hold, for the first
+        // calls: from these the two methods can be written.
+        #[cfg(windows)]
+        if calls <= 4 && let Some(w) = &description {
+            for (k, pair) in w[1..].chunks_exact(2).enumerate() {
+                let (at, len) = (pair[0] as usize, pair[1] as usize);
+                if at < 0x1_0000 || len == 0 || len > 0x4000 {
+                    continue;
+                }
+                let mut bytes = vec![0u8; len.min(0x400)];
+                if !crate::host::read_into(at as *const u8, &mut bytes) {
+                    continue;
+                }
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                tracing::warn!(
+                    slot = format_args!("{:#x}", SLOT),
+                    calls,
+                    pair = k,
+                    at = format_args!("{at:#x}"),
+                    len,
+                    hex,
+                    "a pipeline creation method that is not implemented: a part of its description"
+                );
+            }
+        }
     }
     E_NOTIMPL
 }

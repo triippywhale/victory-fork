@@ -3044,6 +3044,16 @@ impl State {
             // distinct readers are named, to tell what reads them.
             if let View::Constant(address, size) = view
                 && address != 0
+                && u.kind == ResourceType::Cbv
+            {
+                // A constant buffer read in place ([`constant_in_place`]):
+                // its bytes as at submission.
+                if let Some(shadow) = crate::shadow::find(address, u64::from(size)) {
+                    shadow.refresh(list, address, u64::from(size));
+                    list.buffer_read(&shadow.buffer);
+                }
+            } else if let View::Constant(address, size) = view
+                && address != 0
             {
                 static SEEN: std::sync::Mutex<Vec<(ResourceType, u8, u32, bool)>> = std::sync::Mutex::new(Vec::new());
                 let reader = (u.kind, u.slot, u.table_offset_dwords, compute);
@@ -3097,10 +3107,18 @@ impl State {
         compute: bool,
     ) -> Vec<(u8, u32)> {
         let tables = |u: &&UsedResource| u.root == RootType::Table;
+        // Constant buffers the mirrored heap can view in place need no
+        // fresh table ([`constant_in_place`]); others are copied per table.
         let mut fresh: Vec<u8> = used
             .iter()
             .filter(tables)
             .filter(|u| u.kind == ResourceType::Cbv)
+            .filter(|u| {
+                let Some(&Root::Table(table)) = self.roots_ref(compute).get(usize::from(u.slot)) else {
+                    return true;
+                };
+                !constant_in_place(table + u64::from(u.table_offset_dwords) * 4)
+            })
             .map(|u| u.slot)
             .collect();
         // The view shown in place of the title's at dword `at` of the table
@@ -3945,6 +3963,30 @@ fn depth_state(texture: &ID3D12Resource, desc: Option<&D3D12_DEPTH_STENCIL_VIEW_
     } else {
         DEPTH_WRITE
     }
+}
+
+/// Whether the constant buffer view at title descriptor `handle` is read
+/// in place through the mirrored heap (`VICTORY_CBV_IN_PLACE=1`, off by
+/// default): its host copy is 256-byte aligned there and holds the whole
+/// 256-byte rows the host view covers. Its table is then mirrored like any
+/// other and the buffer's bytes are refreshed for the submission
+/// (`State::table_entry`), instead of the table being made afresh in
+/// dynamic slots with the constants copied to upload memory. From PalmVIDev
+/// fcb28c6c, where tables made afresh (about 37 slots each) ran the 65,536
+/// dynamic slots out and some 1,300 draws a frame were dropped.
+fn constant_in_place(handle: u64) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_CBV_IN_PLACE").is_some_and(|v| v == "1")) {
+        return false;
+    }
+    let Some(View::Constant(address, size)) = crate::descriptor::view(handle) else {
+        return false;
+    };
+    if address == 0 {
+        return false;
+    }
+    let rows = u64::from(size.next_multiple_of(256));
+    crate::shadow::find(address, rows).is_some_and(|shadow| shadow.gpu(address).is_multiple_of(256) && shadow.left(address) >= rows)
 }
 
 fn readable(list: &HostList, kind: ResourceType, view: &View) {

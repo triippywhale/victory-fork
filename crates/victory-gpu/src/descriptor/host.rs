@@ -314,52 +314,16 @@ pub(crate) fn remapped(at: usize, len: usize) {
         return;
     }
     if ranges.len() >= MOST {
-        // No pass runs (no shader that picks textures by index is bound:
-        // a load, a cutscene). The ranges were dropped here, and every
-        // texture written meanwhile kept its old bytes until a scheduled
-        // look happened to see it ("changed after its upload with nothing
-        // to tell of it", 98,304 dropped in the run of 2c99589). They are
-        // merged instead, nearest first, into half as many: a merged range
-        // covers its gap too, so slots there are looked at needlessly, never
-        // missed.
+        // No pass runs (no shader that picks textures by index is bound):
+        // the slots there are looked at when they are due, as before.
+        // Merging the ranges instead (0c2b04e) covered the gaps between
+        // them, made thousands of unwritten textures due at once and took
+        // the card to 16.6 of 17 GB before a device removal (run T1 at
+        // 0c2b04e); at 2^18 the queue did not fill in the run of 70656d5.
         STALE[2].fetch_add(ranges.len() as u64, Relaxed);
-        coalesce(&mut ranges, MOST / 2);
+        ranges.clear();
     }
     ranges.push((start, end));
-}
-
-/// Merges `ranges` into at most `most` ranges covering every byte they
-/// covered: sorted, overlapping ones joined, then the smallest gaps closed
-/// first.
-fn coalesce(ranges: &mut Vec<(u64, u64)>, most: usize) {
-    ranges.sort_unstable();
-    let mut joined: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
-    for &(a, e) in ranges.iter() {
-        match joined.last_mut() {
-            Some(last) if a <= last.1 => last.1 = last.1.max(e),
-            _ => joined.push((a, e)),
-        }
-    }
-    if joined.len() > most {
-        // The gap that leaves `most` ranges when every gap up to it closes.
-        let mut gaps: Vec<u64> = joined.windows(2).map(|w| w[1].0 - w[0].1).collect();
-        let k = joined.len() - most;
-        gaps.select_nth_unstable(k - 1);
-        let limit = gaps[k - 1];
-        let mut closed = 0;
-        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(most);
-        for &(a, e) in &joined {
-            match merged.last_mut() {
-                Some(last) if a - last.1 <= limit && closed < k => {
-                    last.1 = e;
-                    closed += 1;
-                }
-                _ => merged.push((a, e)),
-            }
-        }
-        joined = merged;
-    }
-    *ranges = joined;
 }
 
 /// Frames for which a slot a draw read through a table counts as a table's
@@ -3381,22 +3345,6 @@ void BY_FLOATS_OR_NOT(uint3 id : SV_DispatchThreadID) {
     /// view's conversion, whichever of the two the texture itself is (#578).
     /// Without the cast on the host, the view keeps the texture's format, as
     /// before. Samples one texel of 0x80 on the GPU.
-    /// A full queue of written ranges is merged, not dropped: every byte
-    /// stays covered, and at most the asked number of ranges is left.
-    #[test]
-    fn a_full_queue_of_texture_ranges_is_merged_not_dropped() {
-        let mut ranges: Vec<(u64, u64)> = (0..1000u64).rev().map(|k| (k * 0x10000 + (k % 7) * 0x100, k * 0x10000 + 0x1000)).collect();
-        ranges.push((0x5000, 0x6000));
-        ranges.push((0x5800, 0x9000));
-        let before = ranges.clone();
-        super::coalesce(&mut ranges, 100);
-        assert!(ranges.len() <= 100, "{}", ranges.len());
-        assert!(ranges.windows(2).all(|w| w[0].1 < w[1].0));
-        for (a, e) in before {
-            assert!(ranges.iter().any(|&(x, y)| x <= a && e <= y), "{a:#x}..{e:#x} lost");
-        }
-    }
-
     #[test]
     fn rgba8_views_keep_their_srgb_conversion() {
         const UNORM: DXGI_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;

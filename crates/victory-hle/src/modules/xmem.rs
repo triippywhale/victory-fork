@@ -84,6 +84,14 @@ fn address_range(flags: u64) -> (usize, usize) {
     (1 << 32, (1 << bits) - 1)
 }
 
+/// Whether the title's reservations at addresses it chose are
+/// write-watched as ours are (PalmVIDev 476baee2).
+/// `VICTORY_WATCH_RESERVATIONS=0`: not, as before.
+pub(crate) fn watch_reservations() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_WATCH_RESERVATIONS").is_none_or(|v| v != "0"))
+}
+
 pub extern "system" fn XMemVirtualAlloc(
     base: *mut c_void,
     size: usize,
@@ -130,30 +138,47 @@ pub extern "system" fn XMemVirtualAlloc(
     let constrained = base.is_null();
     if constrained {
         kind |= MEM_RESERVE;
-        // The GPU side copies only the pages the title wrote since its last
-        // copy (`victory_gpu`, decision 0007); placeholders cannot be
-        // watched (their physical-page views are copied whole).
-        if kind & MEM_RESERVE_PLACEHOLDER == 0 {
-            kind |= MEM_WRITE_WATCH;
-        }
     }
-    // SAFETY: the title's own arguments, cleaned of console bits; the
-    // parameter points at `requirements`, which outlives the call.
-    let at = unsafe {
-        VirtualAlloc2(
-            GetCurrentProcess(),
-            base,
-            size,
-            kind,
-            protect,
-            if constrained {
-                &mut parameter
-            } else {
-                std::ptr::null_mut()
-            },
-            constrained.into(),
-        )
+    // The GPU side copies only the pages the title wrote since its last
+    // copy (`victory_gpu`, decision 0007); placeholders cannot be watched
+    // (their physical-page views are copied whole). Every reservation is
+    // watched, also one at an address the title chose: only ours were, and
+    // the title's own (some 100 of 4 MiB, below 2^40) were copied whole at
+    // every submission, 98-169 ms a frame on an RTX 4090 (PalmVIDev
+    // 476baee2). A watch can only be asked for when memory is reserved.
+    let watched_theirs = !constrained && watch_reservations();
+    if kind & MEM_RESERVE != 0
+        && kind & (MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER) == 0
+        && (constrained || watched_theirs)
+    {
+        kind |= MEM_WRITE_WATCH;
+    }
+    let mut reserve = |kind| {
+        // SAFETY: the title's own arguments, cleaned of console bits; the
+        // parameter points at `requirements`, which outlives the call.
+        unsafe {
+            VirtualAlloc2(
+                GetCurrentProcess(),
+                base,
+                size,
+                kind,
+                protect,
+                if constrained {
+                    &mut parameter
+                } else {
+                    std::ptr::null_mut()
+                },
+                constrained.into(),
+            )
+        }
     };
+    let mut at = reserve(kind);
+    // A watch the title did not ask for never costs it its memory: refused
+    // with it, the reservation is asked for again without.
+    if at.is_null() && watched_theirs && kind & MEM_WRITE_WATCH != 0 {
+        kind &= !MEM_WRITE_WATCH;
+        at = reserve(kind);
+    }
     if base.is_null() {
         // The census keeps what the title asked for (`VICTORY_CENSUS`).
         #[cfg(windows)]

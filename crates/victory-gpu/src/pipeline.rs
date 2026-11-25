@@ -925,6 +925,144 @@ pub(crate) extern "system" fn create_compute_x(
     create_compute(this, desc, iid, out)
 }
 
+/// What device method 0x218 is given: a compute pipeline already compiled.
+/// Each part is an address and a length in title memory.
+#[repr(C)]
+pub(crate) struct PrecompiledCompute {
+    root: This,
+    /// Thread-group size and the two hardware program words (0x1c bytes).
+    settings: Bytecode,
+    /// A 32-bit hash and a 3 (0x14 bytes; not read).
+    id: Bytecode,
+    /// GFX10 code, in GPU memory, padded to 64 bytes.
+    code: Bytecode,
+    /// The descriptors the code reads.
+    bindings: Bytecode,
+    /// Two pointers, a 64-bit hash and a zero (not read).
+    rest: [u64; 4],
+}
+
+/// The largest part of a precompiled pipeline taken (the code of the ones
+/// seen reaches 0x1f9c0 bytes).
+const PRECOMPILED_PART_LIMIT: usize = 4 << 20;
+
+/// The bytes of a precompiled pipeline's part, copied out of title memory;
+/// `None` if it is empty, implausibly long or not all readable (the parts
+/// lie where the title put them, the code in GPU memory).
+fn precompiled_part(part: &Bytecode) -> Option<Vec<u8>> {
+    if part.code.is_null() || part.size == 0 || part.size > PRECOMPILED_PART_LIMIT {
+        return None;
+    }
+    let mut bytes = vec![0u8; part.size];
+    #[cfg(windows)]
+    if !crate::host::read_into(part.code, &mut bytes) {
+        return None;
+    }
+    #[cfg(not(windows))]
+    // SAFETY: (tests) the caller passes `size` readable bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(part.code, bytes.as_mut_ptr(), part.size)
+    };
+    Some(bytes)
+}
+
+/// Whether the precompiled-pipeline methods make pipelines
+/// (`VICTORY_PRECOMPILED=1`; off by default).
+///
+/// Device methods 0x1c8 and 0x218 are the title's cache of pipelines it has
+/// already compiled. When one fails, the title makes the same pipeline from
+/// its shader containers, through the stream or the compute method
+/// (PalmVIDev d2bd60ea; our runs agree: every shader a frame binds has a
+/// host pipeline while both methods fail). So failing costs no pipeline,
+/// and the switch is for measuring what answering from the cache changes.
+pub(crate) fn precompiled_wanted() -> bool {
+    static WANTED: OnceLock<bool> = OnceLock::new();
+    *WANTED.get_or_init(|| std::env::var_os("VICTORY_PRECOMPILED").is_some_and(|v| v == "1"))
+}
+
+/// Device method 0x218: a compute pipeline from code the title holds
+/// already compiled, `(desc, iid, out)`. Without [`precompiled_wanted`] it
+/// fails with `out` null, and the title makes the pipeline from its
+/// container instead.
+pub(crate) extern "system" fn create_precompiled_compute(
+    _: This,
+    desc: *const PrecompiledCompute,
+    iid: *const Iid,
+    out: *mut This,
+) -> HRESULT {
+    if precompiled_wanted() {
+        return precompiled_compute(desc, iid, out);
+    }
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        tracing::info!(
+            "precompiled compute pipelines (device method 0x218) are refused: the title makes them from its shader containers (VICTORY_PRECOMPILED=1 makes them from the cache)"
+        );
+    });
+    if !out.is_null() {
+        // SAFETY: the title's out pointer.
+        unsafe { *out = std::ptr::null() };
+    }
+    crate::object::E_NOTIMPL
+}
+
+/// [`create_precompiled_compute`] when asked for. The program is written
+/// into a container as the console compiler stores its own
+/// (`victory_shader::precompiled`), and from there on the pipeline is any
+/// compute pipeline: translated on first use, cached by its bytes.
+/// A description that does not read fails with `out` null, and the title
+/// falls back to its container.
+fn precompiled_compute(desc: *const PrecompiledCompute, iid: *const Iid, out: *mut This) -> HRESULT {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static CALLS: AtomicU32 = AtomicU32::new(0);
+    static REFUSED: AtomicU32 = AtomicU32::new(0);
+    let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    if !out.is_null() {
+        // SAFETY: the title's out pointer.
+        unsafe { *out = std::ptr::null() };
+    }
+    // SAFETY: the title passes a description (null is tolerated).
+    let Some(desc) = (unsafe { desc.as_ref() }) else {
+        return E_INVALIDARG;
+    };
+    let parts = [&desc.settings, &desc.code, &desc.bindings].map(precompiled_part);
+    let container = match &parts {
+        [Some(settings), Some(code), Some(bindings)] => {
+            victory_shader::precompiled::compute_container(settings, code, bindings).map_err(|e| e.to_string())
+        }
+        _ => Err("a part of the description is missing or not readable".to_owned()),
+    };
+    match container {
+        Ok(container) => {
+            if calls <= 4 || calls.is_power_of_two() {
+                tracing::info!(calls, code = desc.code.size, "precompiled compute pipeline (device method 0x218)");
+            }
+            hand_out(
+                vec![shader("compute", &container)],
+                #[cfg(windows)]
+                None,
+                iid,
+                out,
+            )
+        }
+        Err(why) => {
+            let refused = REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+            if refused <= 4 || refused.is_power_of_two() {
+                tracing::warn!(
+                    calls,
+                    refused,
+                    why,
+                    settings = desc.settings.size,
+                    code = desc.code.size,
+                    bindings = desc.bindings.size,
+                    "precompiled compute pipeline (device method 0x218) not read: the title makes it from its container"
+                );
+            }
+            E_INVALIDARG
+        }
+    }
+}
+
 /// A pipeline described as a stream: its size and the subobjects, each a
 /// type then its data, padded to 8 bytes.
 #[repr(C)]
@@ -1139,6 +1277,61 @@ mod tests {
             &pipeline(q).shaders[1]
         ));
         assert_eq!(slot::<extern "system" fn(This) -> u32>(p, 0x10)(p), 0);
+    }
+
+    /// Device method 0x218 with the first call a run logged (2026-11-25):
+    /// the pipeline holds one compute shader, a container the translator
+    /// reads the program from, with its 8x8 thread group.
+    #[test]
+    fn a_precompiled_compute_pipeline_keeps_its_program() {
+        fn hex(s: &str) -> Vec<u8> {
+            (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+        }
+        let settings = hex("00cf05400201096c00000000080008000100000043032c408a0b0000");
+        // `s_mov_b32 s8, s4; s_mov_b32 s9, 0; s_load_dwordx8 s[16:23],
+        // s[8:9]; s_endpgm`.
+        let code = hex("0403881b800389be040308f4000000fa000081bf");
+        let mut bindings = Vec::new();
+        for v in [0x403u32, 0x48, 0x60, 0, 0, 0x0001_0440] {
+            bindings.extend_from_slice(&v.to_le_bytes());
+        }
+        // A texture at dword 0 of the table in user-data dword 4.
+        for v in [0x41u32, 0x300, 0, 0x10a, 4, 0x408, u32::MAX, 0] {
+            bindings.extend_from_slice(&v.to_le_bytes());
+        }
+        bindings.extend_from_slice(&0x43u32.to_le_bytes());
+        bindings.extend_from_slice(&[0; 28]);
+        let part = |b: &[u8]| Bytecode { code: b.as_ptr(), size: b.len() };
+        let desc = PrecompiledCompute {
+            root: std::ptr::null(),
+            settings: part(&settings),
+            id: Bytecode { code: std::ptr::null(), size: 0 },
+            code: part(&code),
+            bindings: part(&bindings),
+            rest: [0; 4],
+        };
+        let mut p = std::ptr::null();
+        let hr = precompiled_compute(&desc, &PIPELINE_IIDS[0], &mut p);
+        assert_eq!(hr, S_OK);
+        let [shader] = pipeline(p).shaders.as_slice() else { panic!("one shader") };
+        assert_eq!(shader.stage, "compute");
+        assert_eq!(group_size(p), Some([8, 8, 1]));
+        let c = victory_shader::Container::parse(&shader.container).unwrap();
+        let programs = victory_shader::native_programs(c.part(victory_shader::FourCC::DXIL).unwrap().data).unwrap();
+        assert_eq!(programs[0].code, code);
+        assert_eq!(programs[0].layout[0].user_data, 4);
+        // A description whose binding table does not read fails, `out` null.
+        let desc = PrecompiledCompute { bindings: part(&settings), ..desc };
+        let mut q = std::ptr::dangling();
+        let hr = precompiled_compute(&desc, &PIPELINE_IIDS[0], &mut q);
+        assert_eq!(hr, E_INVALIDARG);
+        assert!(q.is_null());
+        // Not asked for (the default): refused, so that the title makes the
+        // pipeline from its container.
+        let mut q = std::ptr::dangling();
+        let hr = create_precompiled_compute(std::ptr::null(), &desc, &PIPELINE_IIDS[0], &mut q);
+        assert_eq!(hr, crate::object::E_NOTIMPL);
+        assert!(q.is_null());
     }
 
     /// The stream layout the title builds (title+0x86f090): root

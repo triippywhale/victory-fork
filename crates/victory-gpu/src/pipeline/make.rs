@@ -278,9 +278,14 @@ pub(crate) fn now(p: &Arc<Pending>) -> bool {
 }
 
 /// At the title's creation of a pipeline: starts it at once if an earlier
-/// run drew with it (during loading, so the world's first frames find it).
+/// run drew with it (during loading, so the world's first frames find it),
+/// unless memory commit headroom is too tight for speculative prewarming.
 pub(crate) fn early(p: &Arc<Pending>) {
-    if p.left_out.is_none() && !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
+    if p.left_out.is_none()
+        && !p.shaders.is_empty()
+        && super::library::wanted_early(&p.key)
+        && current_commit_budget(1).1
+    {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
         start(p, EARLY);
     }
@@ -426,9 +431,73 @@ const EARLY: u8 = 1;
 const REQUESTED: u8 = 2;
 const MAKING: u8 = 3;
 
+/// Minimum remaining commit charge (in MiB) before `pipeline::make` stops
+/// speculative `EARLY` prewarming and throttles concurrent compiler workers.
+/// `VICTORY_PIPELINE_COMMIT_MB=0` turns commit throttling off.
+const DEFAULT_COMMIT_FLOOR_MB: u64 = 2048;
+
+fn commit_floor_mb() -> u64 {
+    static FLOOR: OnceLock<u64> = OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        std::env::var("VICTORY_PIPELINE_COMMIT_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_COMMIT_FLOOR_MB)
+    })
+}
+
+/// Returns `(max_concurrent_workers, allow_early_prewarm)` for the current
+/// host memory headroom. Never drops `max_concurrent_workers` below 1.
+fn commit_budget(
+    base_workers: usize,
+    avail_commit_bytes: Option<u64>,
+    avail_phys_bytes: Option<u64>,
+    floor_mb: u64,
+) -> (usize, bool) {
+    let base = base_workers.max(1);
+    if floor_mb == 0 {
+        return (base, true);
+    }
+    let floor = floor_mb.saturating_mul(1024 * 1024);
+    let caution = floor.saturating_mul(2);
+    if avail_commit_bytes.is_some_and(|c| c < floor) {
+        return (1, false);
+    }
+    if avail_commit_bytes.is_some_and(|c| c < caution)
+        || avail_phys_bytes.is_some_and(|p| p < floor)
+    {
+        return (base.min(2), false);
+    }
+    (base, true)
+}
+
+fn current_commit_budget(base_workers: usize) -> (usize, bool) {
+    #[cfg(windows)]
+    let (avail_commit, avail_phys) = (
+        crate::host::available_commit_ram(),
+        crate::host::available_physical_ram(),
+    );
+    #[cfg(not(windows))]
+    let (avail_commit, avail_phys) = (None, None);
+    let budget = commit_budget(base_workers, avail_commit, avail_phys, commit_floor_mb());
+    if !budget.1 {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::info!(
+                allowed_workers = budget.0,
+                avail_commit_mb = avail_commit.map(|b| b >> 20),
+                avail_phys_mb = avail_phys.map(|b| b >> 20),
+                "throttling pipeline compilation under low memory headroom"
+            );
+        });
+    }
+    budget
+}
+
 struct Queue {
     early: VecDeque<Arc<Pending>>,
     requested: VecDeque<Arc<Pending>>,
+    active: usize,
 }
 
 impl Queue {
@@ -436,6 +505,7 @@ impl Queue {
         Self {
             early: VecDeque::new(),
             requested: VecDeque::new(),
+            active: 0,
         }
     }
 
@@ -455,14 +525,22 @@ impl Queue {
         Some(prev == NOT_QUEUED)
     }
 
-    fn pop(&mut self) -> Option<Arc<Pending>> {
+    fn pop_with(&mut self, allow_early: bool) -> Option<Arc<Pending>> {
         let p = self.requested.pop_front().or_else(|| {
+            if !allow_early {
+                return None;
+            }
             // An early entry can have been promoted and claimed already.
             std::iter::from_fn(|| self.early.pop_front())
                 .find(|p| p.queue_state.load(Ordering::Relaxed) == EARLY)
         })?;
         p.queue_state.store(MAKING, Ordering::Relaxed);
         Some(p)
+    }
+
+    #[cfg(test)]
+    fn pop(&mut self) -> Option<Arc<Pending>> {
+        self.pop_with(true)
     }
 }
 
@@ -490,11 +568,27 @@ fn start(p: &Arc<Pending>, priority: u8) {
     }
 }
 
-fn next() -> Arc<Pending> {
+struct ActiveGuard;
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+        queue.active = queue.active.saturating_sub(1);
+        if !queue.requested.is_empty() || !queue.early.is_empty() {
+            AVAILABLE.notify_all();
+        }
+    }
+}
+
+fn next(workers: usize) -> (Arc<Pending>, ActiveGuard) {
     let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        if let Some(p) = queue.pop() {
-            return p;
+        let (allowed, allow_early) = current_commit_budget(workers);
+        if queue.active < allowed
+            && let Some(p) = queue.pop_with(allow_early)
+        {
+            queue.active += 1;
+            return (p, ActiveGuard);
         }
         queue = AVAILABLE.wait(queue).unwrap_or_else(|e| e.into_inner());
     }
@@ -530,7 +624,9 @@ fn workers() -> bool {
                         }
                     }
                     loop {
-                        next().make();
+                        let (job, guard) = next(workers);
+                        job.make();
+                        drop(guard);
                         if WAITING.fetch_sub(1, Ordering::Relaxed) == 1 {
                             drained();
                         } else {
@@ -667,5 +763,47 @@ mod tests {
         assert!(first_wait(&p, 7), "and may wait again within that frame");
         assert!(!first_wait(&p, 8), "a later frame does not wait");
         assert!(!first_wait(&p, 6));
+    fn commit_budget_throttles_workers_and_early_under_pressure() {
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+
+        // Escape hatch disables throttling.
+        assert_eq!(commit_budget(6, Some(256 * MIB), Some(256 * MIB), 0), (6, true));
+        // Unknown headroom keeps full concurrency; low physical RAM still throttles.
+        assert_eq!(commit_budget(6, None, None, 2048), (6, true));
+        assert_eq!(commit_budget(6, None, Some(512 * MIB), 2048), (2, false));
+        // Plenty of headroom: all workers + early prewarm allowed.
+        assert_eq!(commit_budget(6, Some(8 * GIB), Some(8 * GIB), 2048), (6, true));
+        assert_eq!(commit_budget(6, Some(4 * GIB), Some(2 * GIB), 2048), (6, true));
+        // Tight commit (< 2x floor = 4 GiB) or low physical RAM (< floor): max 2 workers, no early.
+        assert_eq!(commit_budget(6, Some(4 * GIB - 1), Some(8 * GIB), 2048), (2, false));
+        assert_eq!(commit_budget(6, Some(8 * GIB), Some(2 * GIB - 1), 2048), (2, false));
+        // Critical commit (< floor = 2 GiB): serialize to 1 worker, no early.
+        assert_eq!(commit_budget(6, Some(2 * GIB - 1), Some(8 * GIB), 2048), (1, false));
+        assert_eq!(commit_budget(0, Some(256 * MIB), Some(256 * MIB), 2048), (1, false));
+    }
+
+    #[test]
+    fn early_pipelines_are_deferred_when_only_requested_allowed() {
+        let early_only = Arc::new(Pending::new(Vec::new(), None));
+        let promoted = Arc::new(Pending::new(Vec::new(), None));
+        let requested = Arc::new(Pending::new(Vec::new(), None));
+        let mut queue = Queue::new();
+
+        assert_eq!(queue.push(&early_only, EARLY), Some(true));
+        assert_eq!(queue.push(&promoted, EARLY), Some(true));
+        assert_eq!(queue.push(&requested, REQUESTED), Some(true));
+
+        assert!(Arc::ptr_eq(&queue.pop_with(false).unwrap(), &requested));
+        assert!(queue.pop_with(false).is_none());
+
+        // Promoted early work still runs even when speculative early is paused.
+        assert_eq!(queue.push(&promoted, REQUESTED), Some(false));
+        assert!(Arc::ptr_eq(&queue.pop_with(false).unwrap(), &promoted));
+        assert!(queue.pop_with(false).is_none());
+
+        // Once early is allowed again, the deferred item is drained.
+        assert!(Arc::ptr_eq(&queue.pop_with(true).unwrap(), &early_only));
+        assert!(queue.pop_with(true).is_none());
     }
 }

@@ -55,7 +55,7 @@ pub(crate) struct Shadow {
     /// shaders write (`pending`), each at its offset in the copy: what the
     /// GPU wrote differs. Room for the whole copy; only those ranges' bytes
     /// are set (and read).
-    before: Mutex<Option<Vec<u8>>>,
+    before: std::sync::RwLock<Option<Vec<u8>>>,
     /// With snapshots kept ([`keeps`]): which 64 KiB pieces of the snapshot
     /// hold the copy's bytes as they are now, and whether the snapshot is
     /// counted in [`KEPT_BYTES`].
@@ -1516,19 +1516,31 @@ fn copy_jobs(copies: Vec<(usize, usize, usize)>) -> Vec<Job> {
 /// not yet done), the 64 KiB pieces that differ from the snapshot, as
 /// [`Shadow::copy_back_with`] takes them; found on several threads.
 pub(crate) fn find_all(work: &[(Arc<Shadow>, usize, usize)]) -> Vec<Vec<(usize, usize)>> {
+    // Each copy's snapshot is held for reading while its pieces are
+    // compared, so a merge cannot write it under the scan (fxceless #674);
+    // a copy named twice in `work` is locked once.
+    let mut guards: Vec<(usize, std::sync::RwLockReadGuard<'_, Option<Vec<u8>>>)> = Vec::new();
+    for (shadow, _, _) in work {
+        let key = Arc::as_ptr(shadow) as usize;
+        if !guards.iter().any(|(k, _)| *k == key) {
+            guards.push((key, shadow.before.read().unwrap_or_else(|e| e.into_inner())));
+        }
+    }
     let scans = work
         .iter()
         .map(|(shadow, address, end)| {
             let (from, to) = shadow.inside(*address, end.saturating_sub(*address));
-            // The snapshot's memory stays until the range is done with
-            // (`copy_back_done`), which comes after this.
-            match shadow.before.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            let key = Arc::as_ptr(shadow) as usize;
+            let held = guards.iter().find(|(k, _)| *k == key).map(|(_, g)| g);
+            match held.and_then(|g| g.as_ref()) {
                 Some(before) => (shadow.data as usize, before.as_ptr() as usize, shadow.start as usize, from, to),
                 None => (0, 0, 0, 0, 0),
             }
         })
         .collect();
-    find_pieces(scans)
+    let found = find_pieces(scans);
+    drop(guards);
+    found
 }
 
 /// For each of `scans` (where a copy's bytes are, where its snapshot's
@@ -2403,7 +2415,7 @@ impl Shadow {
         if !self.plain() || !self.pending_holds(address, end) || address < start || end > start + self.len as usize {
             return None;
         }
-        let before = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let before = self.before.write().unwrap_or_else(|e| e.into_inner());
         let snapshot = before.as_ref()?;
         if snapshot.capacity() < end - start {
             return None;
@@ -2418,7 +2430,7 @@ impl Shadow {
     /// Whether the copy has a snapshot at all (taken when a submission
     /// first declared that its shaders write the copy).
     pub(crate) fn snapshot_taken(&self) -> bool {
-        self.before.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.before.write().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     /// A plain copy over `buffer` (mapped at `data`) of title memory
@@ -2428,7 +2440,7 @@ impl Shadow {
         // SAFETY: a live buffer.
         let gpu = unsafe { buffer.GetGPUVirtualAddress() };
         let shadow = Shadow::new(buffer, data, gpu, start, len);
-        *shadow.before.lock().unwrap_or_else(|e| e.into_inner()) = before;
+        *shadow.before.write().unwrap_or_else(|e| e.into_inner()) = before;
         shadow
     }
 
@@ -2605,7 +2617,7 @@ impl Shadow {
             pending: Mutex::default(),
             handed: Mutex::default(),
             flights: Mutex::default(),
-            before: Mutex::default(),
+            before: std::sync::RwLock::default(),
             kept: Mutex::default(),
             used: AtomicU64::new(crate::host::moment()),
             asked: [AtomicU64::new(u64::MAX), AtomicU64::new(0)],
@@ -2704,7 +2716,7 @@ impl Shadow {
         let taken: usize = parts.iter().map(|&(from, to)| to.saturating_sub(from)).sum();
         BACK_CLASS[usize::from(!self.window)].fetch_add(taken as u64, Ordering::Relaxed);
         let total = self.len as usize;
-        let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let mut before = self.before.write().unwrap_or_else(|e| e.into_inner());
         let snapshot = before.get_or_insert_with(|| pooled(total));
         if keeps() {
             // Piece by piece, and only the pieces not known current. A
@@ -2779,7 +2791,7 @@ impl Shadow {
         if self.place.is_some() {
             return 0;
         }
-        let snapshot = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let snapshot = self.before.write().unwrap_or_else(|e| e.into_inner());
         let mut written = 0;
         let (from, to) = self.inside(address, len);
         let start = self.start as usize;
@@ -2884,7 +2896,7 @@ impl Shadow {
         if self.card.is_some() || n == 0 || at + n > self.len as usize {
             return 0;
         }
-        let mut snapshot = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let mut snapshot = self.before.write().unwrap_or_else(|e| e.into_inner());
         let Some(before) = snapshot.as_mut() else {
             return 0;
         };
@@ -3017,7 +3029,7 @@ impl Shadow {
             // the snapshot's.)
             kept.0.clear();
         }
-        if let Some(bytes) = self.before.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(bytes) = self.before.write().unwrap_or_else(|e| e.into_inner()).take() {
             give_back(bytes);
         }
     }
@@ -3161,7 +3173,7 @@ impl Shadow {
                 // reference under the same lock, and a page read before
                 // such a merge and compared after it would take the card's
                 // bytes for the title's.
-                let mut before = self.before.lock().unwrap_or_else(|e| e.into_inner());
+                let mut before = self.before.write().unwrap_or_else(|e| e.into_inner());
                 // A page that is not there is left as it is, and looked at
                 // again next time.
                 if !crate::host::read_into(lo as *const u8, title) {
@@ -3659,7 +3671,7 @@ impl Shadow {
         if bytes == 0 || at + bytes > self.len as usize {
             return 0;
         }
-        let _side = self.before.lock().unwrap_or_else(|e| e.into_inner());
+        let _side = self.before.write().unwrap_or_else(|e| e.into_inner());
         // SAFETY: inside the mapping (checked above). The offsets are in a
         // range declared and not done with, which no refresh writes; what
         // does write it (the title's bytes put in under shader writes)

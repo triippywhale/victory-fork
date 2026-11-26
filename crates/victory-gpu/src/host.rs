@@ -8284,6 +8284,22 @@ impl TitleWrite {
     }
 }
 
+impl TitleWrite {
+    /// Ends the write for a host copy that holds the same bytes as it
+    /// wrote: with `crate::watch::back_current` and a write through a view
+    /// of our own, the pages written, each with the asking that had last
+    /// found it written and the new one (`crate::watch::wrote_aside_noted`),
+    /// for the copy to note itself current. Empty otherwise, and the write
+    /// ends as when dropped.
+    pub(crate) fn done(mut self) -> Vec<(usize, u64, u64)> {
+        if self.aside.is_some() && crate::watch::back_current() {
+            self.aside = None;
+            return crate::watch::wrote_aside_noted(self.at, self.len);
+        }
+        Vec::new()
+    }
+}
+
 impl Drop for TitleWrite {
     fn drop(&mut self) {
         if self.aside.is_some() {

@@ -1053,6 +1053,57 @@ pub(crate) fn aside(at: usize, len: usize) -> Option<*mut u8> {
     crate::inplace::own_view(at, len)
 }
 
+/// Whether a copy that put what shaders wrote back through [`aside`] stays
+/// current for the pages it wrote (`VICTORY_BACK_CURRENT=1`, off by
+/// default; [`wrote_aside_noted`]).
+pub(crate) fn back_current() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BACK_CURRENT").is_some_and(|v| v == "1"))
+}
+
+/// As [`wrote_aside`], with [`back_current`]: the journal is told of the
+/// write here, at a new asking, instead of the guards (the blocks stay
+/// clean and read-only: a title write still faults and is found at a later
+/// asking). Every host copy of the pages, and of the same physical pages
+/// at their other title addresses, takes them at its next refresh; the
+/// copy that wrote them may note itself current. Gives each page of the
+/// range with the asking that had last found it written (0: never) and
+/// the new one. After fxceless/victory-fork 39731795d (`wrote_own`), where
+/// the bytes copied in again went with the bytes copied back, 0.83 MB for
+/// each MB.
+pub(crate) fn wrote_aside_noted(at: usize, len: usize) -> Vec<(usize, u64, u64)> {
+    let blocks = at / BLOCK..at.saturating_add(len).div_ceil(BLOCK);
+    let aliases: Vec<usize> = {
+        let g = guards();
+        blocks
+            .clone()
+            .filter(|&block| g.aliased.contains(block))
+            .flat_map(|block| crate::inplace::pages_of(block * BLOCK))
+            .map(|alias| alias / BLOCK)
+            .filter(|alias| !blocks.contains(alias))
+            .collect()
+    };
+    let noted = {
+        let mut j = JOURNAL.lock().unwrap_or_else(|e| e.into_inner());
+        let j = &mut *j;
+        j.asked += 1;
+        let now = j.asked;
+        // As in [`wrote`]: an asking that stands moves with it, or a copy
+        // taking a page at the standing asking would find it written
+        // "later" at every refresh.
+        if j.kept || !j.ahead.is_empty() {
+            j.ahead_asked = now;
+        }
+        for alias in aliases {
+            j.written.insert(alias, now);
+        }
+        blocks.map(|page| (page, j.written.insert(page, now).unwrap_or(0), now)).collect()
+    };
+    // A placed texture there changes with no descriptor written.
+    crate::descriptor::host::remapped(at, len);
+    noted
+}
+
 /// After our own write of `[at, at + len)` through [`aside`]: its blocks,
 /// and the other views of their pages, are noted written (they stay
 /// read-only), as [`writing`] would have left them.

@@ -2845,6 +2845,7 @@ impl Shadow {
                     write.put(start + at + off, title[off..].as_ptr(), len);
                     written += len;
                 }
+                self.note_current(&write.done());
             }
             // Our write shows as a title write at the copy's next refresh,
             // which copies those pages once more (some dozens of MB a
@@ -3375,6 +3376,29 @@ impl Shadow {
         }
     }
 
+    /// This copy put what shaders wrote back into title memory through a
+    /// view of our own and the journal was told (`pages`: page, the asking
+    /// that had last found it written, the new one;
+    /// `crate::watch::wrote_aside_noted`). A page the copy held current
+    /// before stays current: the merge put the same bytes into the copy and
+    /// into title memory, so the next refresh need not take the page again
+    /// (after fxceless/victory-fork 39731795d, `put_back_own`).
+    fn note_current(&self, pages: &[(usize, u64, u64)]) {
+        if pages.is_empty() {
+            return;
+        }
+        let base = self.start as usize / PAGE;
+        let mut copied = self.copied.lock().unwrap_or_else(|e| e.into_inner());
+        for &(page, before, now) in pages {
+            if let Some(taken) = page.checked_sub(base).and_then(|i| copied.get_mut(i))
+                && *taken != 0
+                && *taken >= before
+            {
+                *taken = (*taken).max(now);
+            }
+        }
+    }
+
     /// Copies the pages of `[from, to)` written after their last copy
     /// (`written`: last writes by page, in page order; `now`: this
     /// asking), whole pages within the buffer.
@@ -3747,7 +3771,9 @@ impl Shadow {
             write.put(start + at - first + from, title[from - first..].as_ptr(), n);
             n
         };
-        merged_stretches(&diffs, &changed).map(|(from, to)| put(from, to)).sum()
+        let written = merged_stretches(&diffs, &changed).map(|(from, to)| put(from, to)).sum();
+        self.note_current(&write.done());
+        written
     }
 }
 

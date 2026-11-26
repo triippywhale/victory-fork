@@ -1379,7 +1379,10 @@ type Job = Box<dyn FnOnce() + Send>;
 /// Threads kept for [`wide`]: what they are to do, and the word that there
 /// is something.
 struct Workers {
-    jobs: Mutex<std::collections::VecDeque<Job>>,
+    /// Each job with the call of [`wide`] that queued it: a caller helps
+    /// only with its own, never with another thread's (a recording
+    /// thread's texture staging, the relay's merges).
+    jobs: Mutex<std::collections::VecDeque<(u64, Job)>>,
     more: std::sync::Condvar,
 }
 
@@ -1399,7 +1402,7 @@ fn workers() -> &'static Workers {
                     let job = {
                         let mut jobs = workers.jobs.lock().unwrap_or_else(|e| e.into_inner());
                         loop {
-                            if let Some(job) = jobs.pop_front() {
+                            if let Some((_, job)) = jobs.pop_front() {
                                 break job;
                             }
                             jobs = workers.more.wait(jobs).unwrap_or_else(|e| e.into_inner());
@@ -1422,27 +1425,32 @@ fn wide(jobs: Vec<Job>) {
         }
         return;
     }
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
     let workers = workers();
     let left = Arc::new((Mutex::new(jobs.len()), std::sync::Condvar::new()));
     {
         let mut queue = workers.jobs.lock().unwrap_or_else(|e| e.into_inner());
         for job in jobs {
             let left = left.clone();
-            queue.push_back(Box::new(move || {
+            queue.push_back((call, Box::new(move || {
                 job();
                 let mut n = left.0.lock().unwrap_or_else(|e| e.into_inner());
                 *n -= 1;
                 if *n == 0 {
                     left.1.notify_all();
                 }
-            }));
+            })));
         }
     }
     workers.more.notify_all();
     loop {
-        let job = workers.jobs.lock().unwrap_or_else(|e| e.into_inner()).pop_front();
+        let job = {
+            let mut queue = workers.jobs.lock().unwrap_or_else(|e| e.into_inner());
+            queue.iter().position(|(c, _)| *c == call).and_then(|at| queue.remove(at))
+        };
         match job {
-            Some(job) => job(),
+            Some((_, job)) => job(),
             None => break,
         }
     }

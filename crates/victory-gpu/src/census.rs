@@ -26,11 +26,7 @@ pub(crate) fn on() -> bool {
 fn period() -> Duration {
     static S: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     Duration::from_secs(*S.get_or_init(|| {
-        std::env::var("VICTORY_CENSUS_SECONDS")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|&s| s > 0)
-            .unwrap_or(10)
+        std::env::var("VICTORY_CENSUS_SECONDS").ok().and_then(|v| v.trim().parse().ok()).filter(|&s| s > 0).unwrap_or(10)
     }))
 }
 
@@ -51,18 +47,7 @@ pub fn title_memory_reserved(at: usize, len: usize, kind: u32, flags: u64, prote
     if !(on() || skip_wc_back()) || at == 0 || len == 0 {
         return;
     }
-    RESERVATIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(
-            at,
-            Reservation {
-                len,
-                kind,
-                flags,
-                protect,
-            },
-        );
+    RESERVATIONS.lock().unwrap_or_else(|e| e.into_inner()).insert(at, Reservation { len, kind, flags, protect });
 }
 
 /// `VICTORY_SKIP_WC_BACK=1`, an EXPERIMENT, not a fix: what shaders wrote
@@ -114,30 +99,21 @@ pub(crate) fn all_wc(ranges: &[(usize, usize)]) -> bool {
 }
 
 fn all_wc_in(reservations: &BTreeMap<usize, Reservation>, ranges: &[(usize, usize)]) -> bool {
-    !ranges.is_empty()
-        && ranges.iter().all(|&(from, to)| {
-            // Seeking from the exclusive end also detects a new reservation
-            // beginning inside the range. An allocation ending at `to` fits.
-            from < to
-                && reservations
-                    .range(..to)
-                    .next_back()
-                    .is_some_and(|(&base, r)| {
-                        base <= from
-                            && r.protect & 0x400 != 0
-                            && base.checked_add(r.len).is_some_and(|end| to <= end)
-                    })
+    !ranges.is_empty() && ranges.iter().all(|&(from, to)| {
+        // Seeking from the exclusive end also detects a new reservation
+        // beginning inside the range. An allocation ending at `to` fits.
+        from < to && reservations.range(..to).next_back().is_some_and(|(&base, r)| {
+            base <= from && r.protect & 0x400 != 0 && base.checked_add(r.len).is_some_and(|end| to <= end)
         })
+    })
 }
 
 /// Declared ranges left out of the compare by [`skip_wc_compare`].
 pub(crate) static UNCOMPARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Pieces left out by [`skip_wc_back`]: count and bytes.
-pub(crate) static SKIPPED: [std::sync::atomic::AtomicU64; 2] = [
-    std::sync::atomic::AtomicU64::new(0),
-    std::sync::atomic::AtomicU64::new(0),
-];
+pub(crate) static SKIPPED: [std::sync::atomic::AtomicU64; 2] =
+    [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 
 /// A flagged piece is clipped to its declaration. Keep every piece of a
 /// mixed declaration so the normal read-back covers it in full.
@@ -151,10 +127,7 @@ pub(crate) fn skip_back(declared: (usize, usize), bytes: u64) -> bool {
         let n = SKIPPED[0].fetch_add(1, Ordering::Relaxed) + 1;
         let b = SKIPPED[1].fetch_add(bytes, Ordering::Relaxed) + bytes;
         if n.is_power_of_two() {
-            tracing::info!(
-                "VICTORY_SKIP_WC_BACK: {n} pieces ({} MB) of write-combining memory left on the card so far",
-                b >> 20
-            );
+            tracing::info!("VICTORY_SKIP_WC_BACK: {n} pieces ({} MB) of write-combining memory left on the card so far", b >> 20);
         }
     }
     wc
@@ -166,12 +139,7 @@ mod wc_tests {
     use std::collections::BTreeMap;
 
     fn reservation(len: usize, protect: u32) -> Reservation {
-        Reservation {
-            len,
-            kind: 0,
-            flags: 0,
-            protect,
-        }
+        Reservation { len, kind: 0, flags: 0, protect }
     }
 
     #[test]
@@ -179,10 +147,7 @@ mod wc_tests {
         const MIB: usize = 1 << 20;
         let window = 8 * MIB;
         let middle = window + 2 * MIB;
-        let map = BTreeMap::from([
-            (window, reservation(2 * MIB, 0x404)),
-            (middle, reservation(2 * MIB, 0x04)),
-        ]);
+        let map = BTreeMap::from([(window, reservation(2 * MIB, 0x404)), (middle, reservation(2 * MIB, 0x04))]);
         let wc = (middle - 65536, middle);
         let ordinary = (middle, middle + 65536);
         assert!(all_wc_in(&map, &[wc]));
@@ -208,19 +173,8 @@ mod wc_tests {
 }
 
 /// Host resources made, by where: count and bytes ([`made`]).
-const KINDS: [&str; 9] = [
-    "read-back",
-    "upload",
-    "shared",
-    "uav",
-    "texture",
-    "reserved texture",
-    "depth twin",
-    "placed in title memory",
-    "host list",
-];
-static MADE: [std::sync::atomic::AtomicU64; 18] =
-    [const { std::sync::atomic::AtomicU64::new(0) }; 18];
+const KINDS: [&str; 9] = ["read-back", "upload", "shared", "uav", "texture", "reserved texture", "depth twin", "placed in title memory", "host list"];
+static MADE: [std::sync::atomic::AtomicU64; 18] = [const { std::sync::atomic::AtomicU64::new(0) }; 18];
 static MADE_LAST: Mutex<[u64; 18]> = Mutex::new([0; 18]);
 
 /// With the census on: a host resource of kind `kind` ([`KINDS`]) and
@@ -252,11 +206,7 @@ struct Census {
     last_at: Option<(Instant, u64)>,
 }
 
-static CENSUS: Mutex<Census> = Mutex::new(Census {
-    copies: BTreeMap::new(),
-    last: BTreeMap::new(),
-    last_at: None,
-});
+static CENSUS: Mutex<Census> = Mutex::new(Census { copies: BTreeMap::new(), last: BTreeMap::new(), last_at: None });
 
 fn census() -> std::sync::MutexGuard<'static, Census> {
     CENSUS.lock().unwrap_or_else(|e| e.into_inner())
@@ -383,21 +333,11 @@ fn report_if_due() {
                 .filter(|(base, r)| *base + r.len > start as usize);
             let (res_s, words, wc) = match res {
                 Some((base, r)) => (
-                    format!(
-                        "{base:#x}+{}MB kind {:#x} flags {:#x} protect {:#x}",
-                        r.len >> 20,
-                        r.kind,
-                        r.flags,
-                        r.protect
-                    ),
+                    format!("{base:#x}+{}MB kind {:#x} flags {:#x} protect {:#x}", r.len >> 20, r.kind, r.flags, r.protect),
                     protect_words(r.protect),
                     r.protect & 0x400 != 0,
                 ),
-                None => (
-                    "not in a recorded reservation".to_owned(),
-                    "?".to_owned(),
-                    false,
-                ),
+                None => ("not in a recorded reservation".to_owned(), "?".to_owned(), false),
             };
             let (in_views, multi) = crate::inplace::view_census(start as usize, now_.len as usize);
             Row {
@@ -420,10 +360,7 @@ fn report_if_due() {
     rows.sort_by(|a, b| (b.fetched + b.sent).total_cmp(&(a.fetched + a.sent)));
 
     let total = |f: &dyn Fn(&Row) -> f64| rows.iter().map(f).sum::<f64>();
-    let only_written = rows
-        .iter()
-        .filter(|r| r.sent > 0.0 && r.fetched == 0.0)
-        .count();
+    let only_written = rows.iter().filter(|r| r.sent > 0.0 && r.fetched == 0.0).count();
     let fetched_wc = total(&|r| if r.wc { r.fetched } else { 0.0 });
     let fetched_multi = total(&|r| if r.multi > 0 { r.fetched } else { 0.0 });
     tracing::info!(
@@ -453,9 +390,7 @@ fn report_if_due() {
                 format!("{name} {n:.1} ({b:.1} MB)")
             })
             .collect();
-        let total: u64 = (0..KINDS.len())
-            .map(|k| now_made[k * 2] - last[k * 2])
-            .sum();
+        let total: u64 = (0..KINDS.len()).map(|k| now_made[k * 2] - last[k * 2]).sum();
         *last = now_made;
         tracing::info!(
             target: "census",

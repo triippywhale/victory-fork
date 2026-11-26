@@ -410,25 +410,17 @@ extern "system" fn precompiled_graphics(
         let mut bytes = [0u8; 192];
         (!desc.is_null() && crate::host::read_into(desc, &mut bytes)).then(|| {
             bytes
-                .as_chunks::<8>()
-                .0
-                .iter()
+                .as_chunks::<8>().0.iter()
                 .map(|c| u64::from_le_bytes(*c))
                 .collect::<Vec<u64>>()
         })
     };
     #[cfg(not(windows))]
-    let description = {
-        let _ = desc;
-        None::<Vec<u64>>
-    };
+    let description = { let _ = desc; None::<Vec<u64>> };
     // A shape: which pairs are filled, and the first two's sizes.
     let new_shape = description.as_ref().is_some_and(|w| {
         static SHAPES: std::sync::Mutex<Vec<(u32, u64, u64)>> = std::sync::Mutex::new(Vec::new());
-        let filled = w[1..]
-            .chunks_exact(2)
-            .enumerate()
-            .fold(0u32, |m, (k, p)| m | u32::from(p[0] != 0) << k);
+        let filled = w[1..].chunks_exact(2).enumerate().fold(0u32, |m, (k, p)| m | u32::from(p[0] != 0) << k);
         let shape = (filled, w[2], w[4]);
         let mut shapes = SHAPES.lock().unwrap_or_else(|e| e.into_inner());
         let new = shapes.len() < 16 && !shapes.contains(&shape);
@@ -447,9 +439,7 @@ extern "system" fn precompiled_graphics(
     }
     // What the description's (pointer, bytes) pairs hold.
     #[cfg(windows)]
-    if (calls <= 4 || new_shape)
-        && let Some(w) = &description
-    {
+    if (calls <= 4 || new_shape) && let Some(w) = &description {
         for (k, pair) in w[1..].chunks_exact(2).enumerate() {
             let (at, len) = (pair[0] as usize, pair[1] as usize);
             if at < 0x1_0000 || len == 0 || len > 0x10_0000 {

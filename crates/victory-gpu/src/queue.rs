@@ -112,9 +112,7 @@ fn split() -> bool {
 #[cfg(windows)]
 pub(crate) fn cuts() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    waits()
-        && split()
-        && *ON.get_or_init(|| std::env::var_os("VICTORY_CUT_WAITS").is_none_or(|v| v != "0"))
+    waits() && split() && *ON.get_or_init(|| std::env::var_os("VICTORY_CUT_WAITS").is_none_or(|v| v != "0"))
 }
 
 /// Whether a present runs what queues still hold (on by default: a wait
@@ -369,8 +367,7 @@ pub(crate) fn async_submit() -> bool {
 
 /// Whether there is something for [`worker`] to look at.
 #[cfg(windows)]
-static WORK: (std::sync::Mutex<bool>, std::sync::Condvar) =
-    (std::sync::Mutex::new(false), std::sync::Condvar::new());
+static WORK: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
 
 #[cfg(windows)]
 fn wake() {
@@ -476,15 +473,10 @@ fn release_held_now(force: bool) {
                         // each range shaders write compared once).
                         #[cfg(feature = "diagnostics")]
                         {
-                            let waits = held
-                                .iter()
-                                .take_while(|h| matches!(h, Held::Value(_)))
-                                .count();
+                            let waits = held.iter().take_while(|h| matches!(h, Held::Value(_))).count();
                             if waits > 0
                                 && matches!(held.get(waits), Some(Held::Run(..)))
-                                && held[..waits]
-                                    .iter()
-                                    .all(|h| matches!(h, Held::Value(w) if w.met()))
+                                && held[..waits].iter().all(|h| matches!(h, Held::Value(w) if w.met()))
                             {
                                 crate::copystat::add(crate::copystat::C::PartsTogether, 1);
                             }
@@ -673,11 +665,7 @@ extern "system" fn execute(this: This, count: u32, lists: *const This) {
             if !unmet.is_empty() {
                 static SEEN: AtomicU64 = AtomicU64::new(0);
                 if SEEN.fetch_add(1, Ordering::Relaxed) < 8 {
-                    tracing::info!(
-                        kind = queue(this).kind,
-                        ?unmet,
-                        "a submission is held for a memory value"
-                    );
+                    tracing::info!(kind = queue(this).kind, ?unmet, "a submission is held for a memory value");
                 }
                 lock(&queue(this).held).extend(unmet.into_iter().map(Held::Value));
                 let mut waiting = lock(&WAITING);
@@ -757,9 +745,7 @@ extern "system" fn signal(this: This, fence: This, value: u64) -> HRESULT {
     }
     // A queue that waits signals after what it holds.
     #[cfg(windows)]
-    if hold(this, || {
-        Held::Signal(crate::fence::FenceRef::new(fence), value)
-    }) {
+    if hold(this, || Held::Signal(crate::fence::FenceRef::new(fence), value)) {
         return S_OK;
     }
     // Behind the submissions sent to the card and not waited for: the
@@ -791,21 +777,11 @@ extern "system" fn wait(this: This, fence: This, value: u64) -> HRESULT {
         {
             static CALLS: AtomicU64 = AtomicU64::new(0);
             if CALLS.fetch_add(1, Ordering::Relaxed) < 8 {
-                tracing::info!(
-                    kind = queue(this).kind,
-                    now,
-                    value,
-                    "a queue is told to wait for a fence"
-                );
+                tracing::info!(kind = queue(this).kind, now, value, "a queue is told to wait for a fence");
             }
         }
         #[cfg(feature = "diagnostics")]
-        crate::capture::op(this as usize, || {
-            format!(
-                "WAIT queue kind {} for fence {fence:?} value {value} (now {now})",
-                queue(this).kind
-            )
-        });
+        crate::capture::op(this as usize, || format!("WAIT queue kind {} for fence {fence:?} value {value} (now {now})", queue(this).kind));
         let behind = {
             let mut held = lock(&queue(this).held);
             let behind = !held.is_empty() || now < value;
@@ -858,10 +834,7 @@ const TIMESTAMP_FREQUENCY: u64 = 100_000_000;
 /// shortcut: the console's suspend waits for the queue's submitted work;
 /// ours returns at once.
 extern "system" fn suspend(_: This, flags: u32) -> HRESULT {
-    tracing::info!(
-        flags,
-        "the title suspends its command queue (SuspendX): nothing to do"
-    );
+    tracing::info!(flags, "the title suspends its command queue (SuspendX): nothing to do");
     S_OK
 }
 extern "system" fn resume(_: This) -> HRESULT {
@@ -1116,9 +1089,7 @@ extern "system" fn copy_page_mappings(
     }
     if !ok {
         static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            tracing::warn!(pool = format_args!("{pool:#x}"), "a page mapping failed")
-        });
+        ONCE.call_once(|| tracing::warn!(pool = format_args!("{pool:#x}"), "a page mapping failed"));
     }
     S_OK
 }
@@ -1337,8 +1308,7 @@ mod tests {
         let guard = lock(&RELEASING);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let releaser = std::thread::spawn(move || {
-            let left =
-                slot::<extern "system" fn(This) -> u32>(q_addr as This, 0x10)(q_addr as This);
+            let left = slot::<extern "system" fn(This) -> u32>(q_addr as This, 0x10)(q_addr as This);
             let _ = done_tx.send(left);
         });
         assert!(
@@ -1354,10 +1324,7 @@ mod tests {
         assert_eq!(left, 0);
         assert!(!lock(&WAITING).contains(&q_addr));
         releaser.join().unwrap();
-        assert_eq!(
-            slot::<extern "system" fn(This) -> u32>(fence, 0x10)(fence),
-            0
-        );
+        assert_eq!(slot::<extern "system" fn(This) -> u32>(fence, 0x10)(fence), 0);
     }
 
     #[cfg(windows)]

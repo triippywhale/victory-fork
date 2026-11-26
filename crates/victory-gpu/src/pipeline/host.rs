@@ -157,8 +157,9 @@ impl GraphicsState {
                 15 => {
                     self.targets = data.cast::<D3D12_RT_FORMAT_ARRAY>().read_unaligned();
                     for f in &mut self.targets.RTFormats {
-                        f.0 = crate::resource::target_format(crate::resource::pc_format(f.0 as u32))
-                            as i32;
+                        f.0 = crate::resource::target_format(crate::resource::pc_format(
+                            f.0 as u32,
+                        )) as i32;
                     }
                 }
                 16 => {
@@ -213,12 +214,7 @@ impl GraphicsState {
             .map(|(e, name)| {
                 format!(
                     "{name:?} {} {} {} {} {} {}",
-                    e.SemanticIndex,
-                    e.Format.0,
-                    e.InputSlot,
-                    e.AlignedByteOffset,
-                    e.InputSlotClass.0,
-                    e.InstanceDataStepRate
+                    e.SemanticIndex, e.Format.0, e.InputSlot, e.AlignedByteOffset, e.InputSlotClass.0, e.InstanceDataStepRate
                 )
             })
             .collect();
@@ -387,10 +383,7 @@ impl HostPipeline {
             stages
         };
         if mesh.is_some() && !host()?.mesh_shaders() {
-            return refuse(
-                "the host GPU has no mesh shaders (or no shader model 6.6)",
-                shaders,
-            );
+            return refuse("the host GPU has no mesh shaders (or no shader model 6.6)", shaders);
         }
         for (s, _) in &stages {
             s.translated()?;
@@ -458,10 +451,7 @@ impl HostPipeline {
                         slot == victory_shader::emit::SLOT_STRIDES
                             || slot == victory_shader::emit::SLOT_MEMORY
                     };
-                    if (uav || kind == D3D12_ROOT_PARAMETER_TYPE_SRV)
-                        && !ours
-                        && bounded_root_srvs()
-                    {
+                    if (uav || kind == D3D12_ROOT_PARAMETER_TYPE_SRV) && !ours && bounded_root_srvs() {
                         // A one-view table: the view's size bounds the
                         // reads (and a root UAV's writes), which a root
                         // descriptor leaves unbounded.
@@ -526,27 +516,24 @@ impl HostPipeline {
             }
             bound.push(stage);
         }
-        let (root, root_blob) =
-            match root_signature(&host.device, &params, &samplers, compute.is_some()) {
-                Ok(root) => root,
-                Err(e) => {
-                    // Its size in dwords (64 at most): constants one each, root
-                    // views two, tables one.
-                    let dwords: u32 = params
-                        .iter()
-                        .map(|p| match p.ParameterType {
-                            // SAFETY: the union member the type names.
-                            D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS => unsafe {
-                                p.Anonymous.Constants.Num32BitValues
-                            },
-                            D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE => 1,
-                            _ => 2,
-                        })
-                        .sum();
-                    tracing::warn!(error = %e, dwords, ?shaders, "host root signature refused");
-                    return None;
-                }
-            };
+        let (root, root_blob) = match root_signature(&host.device, &params, &samplers, compute.is_some()) {
+            Ok(root) => root,
+            Err(e) => {
+                // Its size in dwords (64 at most): constants one each, root
+                // views two, tables one.
+                let dwords: u32 = params
+                    .iter()
+                    .map(|p| match p.ParameterType {
+                        // SAFETY: the union member the type names.
+                        D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS => unsafe { p.Anonymous.Constants.Num32BitValues },
+                        D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE => 1,
+                        _ => 2,
+                    })
+                    .sum();
+                tracing::warn!(error = %e, dwords, ?shaders, "host root signature refused");
+                return None;
+            }
+        };
         let code = |i: usize| {
             stages.get(i).and_then(|(s, _)| s.translated()).map_or(
                 D3D12_SHADER_BYTECODE::default(),
@@ -644,13 +631,7 @@ impl HostPipeline {
             // With the depth bounds test on, the stream form (`bounds_pipeline`).
             let make = |ms: D3D12_SHADER_BYTECODE, ps: D3D12_SHADER_BYTECODE| {
                 if g.bounds && depth_bounds_test() {
-                    bounds_pipeline(
-                        &host.device,
-                        &root,
-                        [none(), none(), ms, ps],
-                        g,
-                        &named(&ms, &ps),
-                    )
+                    bounds_pipeline(&host.device, &root, [none(), none(), ms, ps], g, &named(&ms, &ps))
                 } else {
                     mesh_pipeline(&host.device, &root, ms, ps, g, Some(&named(&ms, &ps)))
                 }
@@ -721,14 +702,12 @@ impl HostPipeline {
             pRootSignature: unsafe { std::mem::transmute_copy(&root) },
             VS: code(0),
             PS: code(1),
-            GS: rect_gs
-                .as_ref()
-                .map_or(D3D12_SHADER_BYTECODE::default(), |gs| {
-                    D3D12_SHADER_BYTECODE {
-                        pShaderBytecode: gs.as_ptr().cast(),
-                        BytecodeLength: gs.len(),
-                    }
-                }),
+            GS: rect_gs.as_ref().map_or(D3D12_SHADER_BYTECODE::default(), |gs| {
+                D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: gs.as_ptr().cast(),
+                    BytecodeLength: gs.len(),
+                }
+            }),
             BlendState: g.blend,
             SampleMask: g.sample_mask,
             RasterizerState: g.rasterizer,
@@ -769,13 +748,7 @@ impl HostPipeline {
         };
         let make = |desc: &D3D12_GRAPHICS_PIPELINE_STATE_DESC, name: &str| {
             if g.bounds && depth_bounds_test() {
-                return bounds_pipeline(
-                    &host.device,
-                    &root,
-                    [desc.VS, desc.GS, none(), desc.PS],
-                    g,
-                    name,
-                );
+                return bounds_pipeline(&host.device, &root, [desc.VS, desc.GS, none(), desc.PS], g, name);
             }
             super::library::pipeline(
                 name,
@@ -788,10 +761,7 @@ impl HostPipeline {
         let mut made = make(&desc, &name(rect_gs.as_ref()));
         if made.is_err() && rect_gs.is_some() {
             // The host refused the geometry stage: once more without it.
-            tracing::warn!(
-                ?shaders,
-                "host pipeline refused with the rectangle geometry stage"
-            );
+            tracing::warn!(?shaders, "host pipeline refused with the rectangle geometry stage");
             host.log_messages();
             desc.GS = D3D12_SHADER_BYTECODE::default();
             rect_gs = None;
@@ -834,10 +804,7 @@ impl HostPipeline {
                 let face = |f: &D3D12_DEPTH_STENCILOP_DESC| {
                     format!(
                         "fail {} depth-fail {} pass {} func {}",
-                        f.StencilFailOp.0,
-                        f.StencilDepthFailOp.0,
-                        f.StencilPassOp.0,
-                        f.StencilFunc.0
+                        f.StencilFailOp.0, f.StencilDepthFailOp.0, f.StencilPassOp.0, f.StencilFunc.0
                     )
                 };
                 format!(
@@ -904,27 +871,15 @@ fn mesh_pipeline(
         topology: Sub<D3D12_PRIMITIVE_TOPOLOGY_TYPE>,
     }
     let mut stream = Stream {
-        root: Sub(
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,
-            root.as_raw(),
-        ),
+        root: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw()),
         ms: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS, ms),
         ps: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS, ps),
         blend: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, g.blend),
-        mask: Sub(
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK,
-            g.sample_mask,
-        ),
+        mask: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask),
         raster: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer),
         depth: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL, g.depth),
-        targets: Sub(
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,
-            g.targets,
-        ),
-        dsv: Sub(
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,
-            g.depth_format,
-        ),
+        targets: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, g.targets),
+        dsv: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, g.depth_format),
         samples: Sub(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, g.samples),
         topology: Sub(
             D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY,
@@ -939,9 +894,7 @@ fn mesh_pipeline(
         // SAFETY: padding bytes of `sub`, inside it.
         unsafe {
             bytes.add(4).write_bytes(0, at - 4);
-            bytes
-                .add(at + size_of::<T>())
-                .write_bytes(0, size_of::<Sub<T>>() - at - size_of::<T>());
+            bytes.add(at + size_of::<T>()).write_bytes(0, size_of::<Sub<T>>() - at - size_of::<T>());
         }
     }
     zero_gaps(&mut stream.root);
@@ -1050,9 +1003,7 @@ pub(crate) fn depth_bounds_test() -> bool {
                 .is_ok()
         }) && options.DepthBoundsTestSupported.as_bool();
         if !has {
-            tracing::warn!(
-                "no depth bounds test on this host: draws that ask for it pass at every depth"
-            );
+            tracing::warn!("no depth bounds test on this host: draws that ask for it pass at every depth");
         }
         has
     })
@@ -1078,21 +1029,11 @@ fn bounds_pipeline(
         stream.resize(at + words, 0);
         // SAFETY: room for one subobject, whose alignment is the words';
         // the descriptions are plain data (nothing is dropped).
-        unsafe {
-            stream
-                .as_mut_ptr()
-                .add(at)
-                .cast::<Sub<T>>()
-                .write(Sub(kind, value))
-        };
+        unsafe { stream.as_mut_ptr().add(at).cast::<Sub<T>>().write(Sub(kind, value)) };
     }
     let mut stream = Vec::new();
     let s = &mut stream;
-    add(
-        s,
-        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE,
-        root.as_raw(),
-    );
+    add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE, root.as_raw());
     for (kind, code) in [
         (D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS, vs),
         (D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS, gs),
@@ -1104,16 +1045,8 @@ fn bounds_pipeline(
         }
     }
     add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND, g.blend);
-    add(
-        s,
-        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK,
-        g.sample_mask,
-    );
-    add(
-        s,
-        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER,
-        g.rasterizer,
-    );
+    add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK, g.sample_mask);
+    add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER, g.rasterizer);
     let d = &g.depth;
     let depth = D3D12_DEPTH_STENCIL_DESC1 {
         DepthEnable: d.DepthEnable,
@@ -1133,37 +1066,17 @@ fn bounds_pipeline(
             NumElements: g.inputs.len() as u32,
         };
         add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT, inputs);
-        add(
-            s,
-            D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE,
-            g.strip_cut,
-        );
+        add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_IB_STRIP_CUT_VALUE, g.strip_cut);
     }
     let topology = match g.topology.0 {
         _ if !ms.pShaderBytecode.is_null() => D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
         RECTANGLES | QUADS => D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
         _ => g.topology,
     };
-    add(
-        s,
-        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY,
-        topology,
-    );
-    add(
-        s,
-        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS,
-        g.targets,
-    );
-    add(
-        s,
-        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT,
-        g.depth_format,
-    );
-    add(
-        s,
-        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC,
-        g.samples,
-    );
+    add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PRIMITIVE_TOPOLOGY, topology);
+    add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS, g.targets);
+    add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT, g.depth_format);
+    add(s, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC, g.samples);
     let desc = D3D12_PIPELINE_STATE_STREAM_DESC {
         SizeInBytes: stream.len() * 8,
         pPipelineStateSubobjectStream: stream.as_mut_ptr().cast(),
@@ -1219,23 +1132,14 @@ fn zero_padding(blend: &mut D3D12_BLEND_DESC, depth: &mut D3D12_DEPTH_STENCIL_DE
     for target in &mut blend.RenderTarget {
         let bytes = (&raw mut *target).cast::<u8>();
         // SAFETY: the padding after the last field, inside `target`.
-        unsafe {
-            bytes
-                .add(mask)
-                .write_bytes(0, size_of::<D3D12_RENDER_TARGET_BLEND_DESC>() - mask)
-        };
+        unsafe { bytes.add(mask).write_bytes(0, size_of::<D3D12_RENDER_TARGET_BLEND_DESC>() - mask) };
     }
     let (write, front) = (
         offset_of!(D3D12_DEPTH_STENCIL_DESC, StencilWriteMask) + 1,
         offset_of!(D3D12_DEPTH_STENCIL_DESC, FrontFace),
     );
     // SAFETY: the padding between two fields, inside `depth`.
-    unsafe {
-        (&raw mut *depth)
-            .cast::<u8>()
-            .add(write)
-            .write_bytes(0, front - write)
-    };
+    unsafe { (&raw mut *depth).cast::<u8>().add(write).write_bytes(0, front - write) };
 }
 
 /// The bytes of shader code (none for an absent stage).
@@ -1244,8 +1148,7 @@ fn code_bytes(code: &D3D12_SHADER_BYTECODE) -> Vec<u8> {
         return Vec::new();
     }
     // SAFETY: a translation's own bytes, alive while its shader is.
-    unsafe { std::slice::from_raw_parts(code.pShaderBytecode.cast::<u8>(), code.BytecodeLength) }
-        .to_vec()
+    unsafe { std::slice::from_raw_parts(code.pShaderBytecode.cast::<u8>(), code.BytecodeLength) }.to_vec()
 }
 
 fn root_signature(
@@ -1340,9 +1243,7 @@ mod root_flag_tests {
 
     #[test]
     fn host_root_signature_serializes_and_creates() {
-        let Some(host) = crate::host::host() else {
-            return;
-        };
+        let Some(host) = crate::host::host() else { return };
         let (root, bytes) = root_signature(&host.device, &[], &[], false).unwrap();
         assert!(!bytes.is_empty());
         let _ = root;
@@ -1370,32 +1271,15 @@ mod tests {
             let (mut blend, mut depth): (D3D12_BLEND_DESC, D3D12_DEPTH_STENCIL_DESC) =
                 unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
             unsafe {
-                (&raw mut blend)
-                    .cast::<u8>()
-                    .write_bytes(fill, size_of::<D3D12_BLEND_DESC>());
-                (&raw mut depth)
-                    .cast::<u8>()
-                    .write_bytes(fill, size_of::<D3D12_DEPTH_STENCIL_DESC>());
+                (&raw mut blend).cast::<u8>().write_bytes(fill, size_of::<D3D12_BLEND_DESC>());
+                (&raw mut depth).cast::<u8>().write_bytes(fill, size_of::<D3D12_DEPTH_STENCIL_DESC>());
             }
             let base = GraphicsState::default();
-            (blend.AlphaToCoverageEnable, blend.IndependentBlendEnable) = (
-                base.blend.AlphaToCoverageEnable,
-                base.blend.IndependentBlendEnable,
-            );
+            (blend.AlphaToCoverageEnable, blend.IndependentBlendEnable) =
+                (base.blend.AlphaToCoverageEnable, base.blend.IndependentBlendEnable);
             for (t, b) in blend.RenderTarget.iter_mut().zip(&base.blend.RenderTarget) {
-                (
-                    t.BlendEnable,
-                    t.LogicOpEnable,
-                    t.SrcBlend,
-                    t.DestBlend,
-                    t.BlendOp,
-                ) = (
-                    b.BlendEnable,
-                    b.LogicOpEnable,
-                    b.SrcBlend,
-                    b.DestBlend,
-                    b.BlendOp,
-                );
+                (t.BlendEnable, t.LogicOpEnable, t.SrcBlend, t.DestBlend, t.BlendOp) =
+                    (b.BlendEnable, b.LogicOpEnable, b.SrcBlend, b.DestBlend, b.BlendOp);
                 (t.SrcBlendAlpha, t.DestBlendAlpha, t.BlendOpAlpha, t.LogicOp) =
                     (b.SrcBlendAlpha, b.DestBlendAlpha, b.BlendOpAlpha, b.LogicOp);
                 t.RenderTargetWriteMask = b.RenderTargetWriteMask;
@@ -1403,11 +1287,8 @@ mod tests {
             let d = base.depth;
             (depth.DepthEnable, depth.DepthWriteMask, depth.DepthFunc) =
                 (d.DepthEnable, d.DepthWriteMask, d.DepthFunc);
-            (
-                depth.StencilEnable,
-                depth.StencilReadMask,
-                depth.StencilWriteMask,
-            ) = (d.StencilEnable, d.StencilReadMask, d.StencilWriteMask);
+            (depth.StencilEnable, depth.StencilReadMask, depth.StencilWriteMask) =
+                (d.StencilEnable, d.StencilReadMask, d.StencilWriteMask);
             (depth.FrontFace, depth.BackFace) = (d.FrontFace, d.BackFace);
             zero_padding(&mut blend, &mut depth);
             (bytes(&blend).to_vec(), bytes(&depth).to_vec())
@@ -1418,8 +1299,9 @@ mod tests {
 
     #[test]
     fn blending_is_off_for_integer_targets_and_kept_for_the_others() {
-        let blending =
-            |g: &GraphicsState| g.blend.RenderTarget.map(|t| t.BlendEnable.as_bool())[..3].to_vec();
+        let blending = |g: &GraphicsState| {
+            g.blend.RenderTarget.map(|t| t.BlendEnable.as_bool())[..3].to_vec()
+        };
         let title = |independent: bool| {
             let mut g = GraphicsState::default();
             g.targets.NumRenderTargets = 3;
@@ -1514,24 +1396,11 @@ mod tests {
         };
         use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
         use windows::core::s;
-        let source =
-            b"float4 main(uint id : SV_VertexID) : SV_Position { return float4(id, id, 0.5, 1); }";
+        let source = b"float4 main(uint id : SV_VertexID) : SV_Position { return float4(id, id, 0.5, 1); }";
         let mut blob: Option<ID3DBlob> = None;
         // SAFETY: the arguments are live and `blob` is the out pointer.
         unsafe {
-            D3DCompile(
-                source.as_ptr().cast(),
-                source.len(),
-                PCSTR::null(),
-                None,
-                None,
-                s!("main"),
-                s!("vs_5_1"),
-                0,
-                0,
-                &mut blob,
-                None,
-            )
+            D3DCompile(source.as_ptr().cast(), source.len(), PCSTR::null(), None, None, s!("main"), s!("vs_5_1"), 0, 0, &mut blob, None)
         }
         .expect("compiles");
         let blob = blob.expect("code");
@@ -1550,15 +1419,9 @@ mod tests {
         assert_ne!(plain, g.describe());
         g.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         g.depth_format = DXGI_FORMAT_D32_FLOAT;
-        let name = super::super::library::name(
-            "bounds test",
-            &root_blob,
-            &[&code_bytes(&vs)],
-            &g.describe(),
-        );
+        let name = super::super::library::name("bounds test", &root_blob, &[&code_bytes(&vs)], &g.describe());
         for _ in 0..2 {
-            bounds_pipeline(&host.device, &root, [vs, none(), none(), none()], &g, &name)
-                .expect("made");
+            bounds_pipeline(&host.device, &root, [vs, none(), none(), none()], &g, &name).expect("made");
         }
     }
 

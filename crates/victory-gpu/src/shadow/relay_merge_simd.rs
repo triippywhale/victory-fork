@@ -102,11 +102,7 @@ mod tests {
                     &mut expected_title[t..t + len],
                 );
                 assert_eq!(
-                    merge(
-                        &now[n..n + len],
-                        &mut held[h..h + len],
-                        &mut title[t..t + len]
-                    ),
+                    merge(&now[n..n + len], &mut held[h..h + len], &mut title[t..t + len]),
                     expected
                 );
                 assert_eq!(held, expected_held);

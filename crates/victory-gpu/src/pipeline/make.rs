@@ -69,7 +69,8 @@ fn named(shaders: &[Arc<Shader>], name: &[u8]) -> bool {
 /// `VICTORY_ACTIVATE_RAYS=0` leaves it out.
 fn too_dear(shaders: &[Arc<Shader>]) -> bool {
     static OUT: OnceLock<bool> = OnceLock::new();
-    let out = *OUT.get_or_init(|| std::env::var_os("VICTORY_ACTIVATE_RAYS").is_some_and(|v| v == "0"));
+    let out =
+        *OUT.get_or_init(|| std::env::var_os("VICTORY_ACTIVATE_RAYS").is_some_and(|v| v == "0"));
     out && named(shaders, b"CS_ScreenProbes_ActivateRays")
 }
 
@@ -104,7 +105,13 @@ impl Pending {
             key.update(s.stage.as_bytes());
             key.update(s.hash.as_bytes());
         }
-        key.update(graphics.as_ref().map(|g| g.describe()).unwrap_or_default().as_bytes());
+        key.update(
+            graphics
+                .as_ref()
+                .map(|g| g.describe())
+                .unwrap_or_default()
+                .as_bytes(),
+        );
         let left_out = left_out(&shaders);
         Pending {
             shaders,
@@ -135,10 +142,10 @@ impl Pending {
 pub(crate) fn missing(p: &Pending) -> Option<String> {
     match p.made.get() {
         Some(Some(_)) => None,
-        None => Some(p.left_out.map_or_else(
-            || format!("being made {:?}", p.shaders),
-            str::to_owned,
-        )),
+        None => Some(
+            p.left_out
+                .map_or_else(|| format!("being made {:?}", p.shaders), str::to_owned),
+        ),
         Some(None) => {
             let failed: Vec<String> = p
                 .shaders
@@ -177,7 +184,9 @@ fn slow(p: &Pending) -> bool {
     // A pass a title runs once (it unpacks a model, say) is lost if its
     // pipeline is not there; a draw comes again in the next frame.
     let most = if p.computes() { 10 } else { 3 };
-    p.begun.get().is_some_and(|at| at.elapsed() > Duration::from_secs(most))
+    p.begun
+        .get()
+        .is_some_and(|at| at.elapsed() > Duration::from_secs(most))
 }
 
 /// What a frame may wait while a world loads: pipelines are asked for by
@@ -247,10 +256,14 @@ fn wait_once() -> bool {
 /// Whether `frame` is the first frame that waits for `p` (it is from now
 /// on, if none was).
 fn first_wait(p: &Pending, frame: u64) -> bool {
-    let first = match p.waited_frame.compare_exchange(u64::MAX, frame, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => frame,
-        Err(f) => f,
-    };
+    let first =
+        match p
+            .waited_frame
+            .compare_exchange(u64::MAX, frame, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => frame,
+            Err(f) => f,
+        };
     first == frame
 }
 
@@ -333,7 +346,10 @@ impl WaitBudget {
             return Duration::ZERO;
         }
         if self.frame != Some(frame) {
-            *self = Self { frame: Some(frame), ..Self::default() };
+            *self = Self {
+                frame: Some(frame),
+                ..Self::default()
+            };
         }
         if !shared {
             return budget.saturating_sub(self.spent);
@@ -341,7 +357,9 @@ impl WaitBudget {
         // While this thread waits, the frame's waiting time runs on at one
         // second per second however many wait with it, so the window ends
         // for every thread in it when the budget is spent.
-        let running = self.since.map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        let running = self
+            .since
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
         let left = budget.saturating_sub(self.spent + running);
         if !left.is_zero() {
             if self.waiting == 0 {
@@ -352,7 +370,14 @@ impl WaitBudget {
         left
     }
 
-    fn finish(&mut self, frame: u64, reserved: Duration, elapsed: Duration, shared: bool, now: Instant) {
+    fn finish(
+        &mut self,
+        frame: u64,
+        reserved: Duration,
+        elapsed: Duration,
+        shared: bool,
+        now: Instant,
+    ) {
         if self.frame != Some(frame) {
             // A frame that began meanwhile has its own budget.
             return;
@@ -382,7 +407,14 @@ fn wait(p: &Pending, frame: u64) {
     let compute = p.computes();
     let past_total = &LOADINGS[usize::from(compute)];
     let loading = loading_left(Duration::from_millis(past_total.load(Ordering::Relaxed)));
-    let budget = budget.max((if compute { LOADING_FRAME_COMPUTE } else { LOADING_FRAME }).min(loading));
+    let budget = budget.max(
+        (if compute {
+            LOADING_FRAME_COMPUTE
+        } else {
+            LOADING_FRAME
+        })
+        .min(loading),
+    );
     // The frame the budget belongs to, and what was waited of it (or is
     // taken by a thread waiting now).
     static SPENTS: [Mutex<WaitBudget>; 2] = [const {
@@ -396,7 +428,10 @@ fn wait(p: &Pending, frame: u64) {
     let frame_spent = &SPENTS[usize::from(compute)];
     let shared = shared_budget();
     let started = Instant::now();
-    let left = frame_spent.lock().unwrap_or_else(|e| e.into_inner()).reserve(frame, budget, shared, started);
+    let left = frame_spent
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .reserve(frame, budget, shared, started);
     if left.is_zero() {
         return;
     }
@@ -409,7 +444,10 @@ fn wait(p: &Pending, frame: u64) {
         }
         // Woken now and then to see whether it has become a slow one.
         let rest = rest.min(Duration::from_millis(250));
-        held = done.wait_timeout(held, rest).unwrap_or_else(|e| e.into_inner()).0;
+        held = done
+            .wait_timeout(held, rest)
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
     }
     drop(held);
     let waited = started.elapsed().min(left);
@@ -562,7 +600,10 @@ fn start(p: &Arc<Pending>, priority: u8) {
     let mut queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(new) = queue.push(p, priority) {
         if new {
-            PEAK.fetch_max(WAITING.fetch_add(1, Ordering::Relaxed) + 1, Ordering::Relaxed);
+            PEAK.fetch_max(
+                WAITING.fetch_add(1, Ordering::Relaxed) + 1,
+                Ordering::Relaxed,
+            );
         }
         AVAILABLE.notify_one();
     }
@@ -607,7 +648,9 @@ fn workers() -> bool {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .map(|n| n.clamp(1, 64))
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8)));
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8))
+            });
         let normal = std::env::var_os("VICTORY_PIPELINE_NORMAL").is_some_and(|v| v == "1");
         tracing::info!(workers, normal, "host pipeline workers");
         for i in 0..workers {
@@ -620,7 +663,8 @@ fn workers() -> bool {
                     if !normal {
                         unsafe {
                             use windows::Win32::System::Threading::*;
-                            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                            let _ =
+                                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
                         }
                     }
                     loop {
@@ -771,19 +815,40 @@ mod tests {
         const GIB: u64 = 1024 * MIB;
 
         // Escape hatch disables throttling.
-        assert_eq!(commit_budget(6, Some(256 * MIB), Some(256 * MIB), 0), (6, true));
+        assert_eq!(
+            commit_budget(6, Some(256 * MIB), Some(256 * MIB), 0),
+            (6, true)
+        );
         // Unknown headroom keeps full concurrency; low physical RAM still throttles.
         assert_eq!(commit_budget(6, None, None, 2048), (6, true));
         assert_eq!(commit_budget(6, None, Some(512 * MIB), 2048), (2, false));
         // Plenty of headroom: all workers + early prewarm allowed.
-        assert_eq!(commit_budget(6, Some(8 * GIB), Some(8 * GIB), 2048), (6, true));
-        assert_eq!(commit_budget(6, Some(4 * GIB), Some(2 * GIB), 2048), (6, true));
+        assert_eq!(
+            commit_budget(6, Some(8 * GIB), Some(8 * GIB), 2048),
+            (6, true)
+        );
+        assert_eq!(
+            commit_budget(6, Some(4 * GIB), Some(2 * GIB), 2048),
+            (6, true)
+        );
         // Tight commit (< 2x floor = 4 GiB) or low physical RAM (< floor): max 2 workers, no early.
-        assert_eq!(commit_budget(6, Some(4 * GIB - 1), Some(8 * GIB), 2048), (2, false));
-        assert_eq!(commit_budget(6, Some(8 * GIB), Some(2 * GIB - 1), 2048), (2, false));
+        assert_eq!(
+            commit_budget(6, Some(4 * GIB - 1), Some(8 * GIB), 2048),
+            (2, false)
+        );
+        assert_eq!(
+            commit_budget(6, Some(8 * GIB), Some(2 * GIB - 1), 2048),
+            (2, false)
+        );
         // Critical commit (< floor = 2 GiB): serialize to 1 worker, no early.
-        assert_eq!(commit_budget(6, Some(2 * GIB - 1), Some(8 * GIB), 2048), (1, false));
-        assert_eq!(commit_budget(0, Some(256 * MIB), Some(256 * MIB), 2048), (1, false));
+        assert_eq!(
+            commit_budget(6, Some(2 * GIB - 1), Some(8 * GIB), 2048),
+            (1, false)
+        );
+        assert_eq!(
+            commit_budget(0, Some(256 * MIB), Some(256 * MIB), 2048),
+            (1, false)
+        );
     }
 
     #[test]

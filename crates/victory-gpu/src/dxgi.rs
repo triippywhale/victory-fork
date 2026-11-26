@@ -235,7 +235,11 @@ fn display_size() -> (u32, u32) {
             Some((w, h)) if (640..=7680).contains(&w) && (360..=4320).contains(&h) => (w, h),
             _ => (3840, 2160),
         };
-        tracing::info!(width = size.0, height = size.1, "display mode reported to the title");
+        tracing::info!(
+            width = size.0,
+            height = size.1,
+            "display mode reported to the title"
+        );
         size
     })
 }

@@ -85,7 +85,8 @@ static SHADERS: Mutex<Option<HashMap<[u8; 32], Arc<Shader>>>> = Mutex::new(None)
 
 /// For the memory lines: containers kept and their bytes, translations
 /// kept and the bytes of their host code. None of them is ever let go.
-static KEPT: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+static KEPT: [std::sync::atomic::AtomicU64; 4] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 /// What the shader table and the pipeline library keep in memory:
 /// containers and their bytes, translations and their bytes, the bytes of
@@ -171,7 +172,10 @@ impl Shader {
                 }
                 if let Ok(t) = &done {
                     KEPT[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    KEPT[3].fetch_add(t.host.dxil.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    KEPT[3].fetch_add(
+                        t.host.dxil.len() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 match &done {
                     Ok(t) => tracing::info!(
@@ -269,7 +273,13 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         })
         .map(|p| p.used)
         .unwrap_or_default();
-    Ok(Translated { host, used, stores, walks, stores_by_address })
+    Ok(Translated {
+        host,
+        used,
+        stores,
+        walks,
+        stores_by_address,
+    })
 }
 
 /// The compute pipelines of the console's ray-tracing structure builder
@@ -351,7 +361,9 @@ fn of_builder(shaders: &[Arc<Shader>]) -> bool {
 pub(crate) fn builder_quarantined(this: This) -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     is_builder(this)
-        && (*ON.get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1")) || in_warmup())
+        && (*ON
+            .get_or_init(|| std::env::var_os("VICTORY_BVH_QUARANTINE").is_some_and(|v| v == "1"))
+            || in_warmup())
 }
 
 /// The frame the builder first ran in (0: not yet).
@@ -368,7 +380,10 @@ static BUILDER_FROM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 fn in_warmup() -> bool {
     static FRAMES: OnceLock<u64> = OnceLock::new();
     let frames = *FRAMES.get_or_init(|| {
-        std::env::var("VICTORY_BVH_WARMUP").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+        std::env::var("VICTORY_BVH_WARMUP")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
     });
     let from = BUILDER_FROM.load(std::sync::atomic::Ordering::Relaxed);
     frames > 0 && (from == 0 || crate::frame::current() < from + frames)
@@ -504,7 +519,10 @@ pub(crate) fn builder_off(why: &'static str) {
     if !b.off {
         b.off = true;
         BUILDER_LIVE.store(false, std::sync::atomic::Ordering::Relaxed);
-        tracing::warn!(why, "the ray-tracing structure builder is turned off for the rest of the run: its stages run all or none");
+        tracing::warn!(
+            why,
+            "the ray-tracing structure builder is turned off for the rest of the run: its stages run all or none"
+        );
     }
 }
 
@@ -526,7 +544,10 @@ pub(crate) fn builder_off(why: &'static str) {
 pub(crate) fn builder_wanted() -> bool {
     static WANTED: OnceLock<bool> = OnceLock::new();
     *WANTED.get_or_init(|| {
-        matches!(std::env::var("VICTORY_BVH_BUILDER").as_deref(), Ok("1" | "2"))
+        matches!(
+            std::env::var("VICTORY_BVH_BUILDER").as_deref(),
+            Ok("1" | "2")
+        )
     })
 }
 
@@ -583,7 +604,10 @@ pub(crate) fn builder_runs(this: Option<This>) -> bool {
         b.whole = true;
         b.partial = missing > 0;
         BUILDER_LIVE.store(true, std::sync::atomic::Ordering::Relaxed);
-        BUILDER_FROM.store(crate::frame::current(), std::sync::atomic::Ordering::Relaxed);
+        BUILDER_FROM.store(
+            crate::frame::current(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     if b.partial && this.is_some_and(|this| !make::now(&pipeline(this).host)) {
         b.off = true;
@@ -601,8 +625,10 @@ pub(crate) fn builder_runs(this: Option<This>) -> bool {
 /// the two instructions that test a ray against a node of one.
 #[cfg(windows)]
 fn walks(program: &victory_shader::NativeProgram) -> bool {
-    victory_shader::gfx10::decode(&program.code)
-        .is_ok_and(|code| code.iter().any(|i| i.name().is_some_and(|n| n.starts_with("image_bvh"))))
+    victory_shader::gfx10::decode(&program.code).is_ok_and(|code| {
+        code.iter()
+            .any(|i| i.name().is_some_and(|n| n.starts_with("image_bvh")))
+    })
 }
 
 /// Whether a console program can store to buffer memory: it has a buffer,
@@ -688,7 +714,9 @@ pub(crate) fn group_size(this: This) -> Option<[u32; 3]> {
     if this.is_null() {
         return None;
     }
-    let [shader] = pipeline(this).shaders.as_slice() else { return None };
+    let [shader] = pipeline(this).shaders.as_slice() else {
+        return None;
+    };
     if shader.stage != "compute" {
         return None;
     }
@@ -811,7 +839,10 @@ pub(crate) fn note_drop(this: This) {
 pub(crate) fn note_why(why: String) {
     crate::capture::op(0, || format!("DROPPED {why}"));
     let mut drops = DROPS.lock().unwrap_or_else(|e| e.into_inner());
-    *drops.get_or_insert_with(HashMap::new).entry(why).or_default() += 1;
+    *drops
+        .get_or_insert_with(HashMap::new)
+        .entry(why)
+        .or_default() += 1;
 }
 
 /// The drops counted since the last call, most first (diagnostics).
@@ -1013,7 +1044,11 @@ pub(crate) extern "system" fn create_precompiled_compute(
 /// compute pipeline: translated on first use, cached by its bytes.
 /// A description that does not read fails with `out` null, and the title
 /// falls back to its container.
-fn precompiled_compute(desc: *const PrecompiledCompute, iid: *const Iid, out: *mut This) -> HRESULT {
+fn precompiled_compute(
+    desc: *const PrecompiledCompute,
+    iid: *const Iid,
+    out: *mut This,
+) -> HRESULT {
     use std::sync::atomic::{AtomicU32, Ordering};
     static CALLS: AtomicU32 = AtomicU32::new(0);
     static REFUSED: AtomicU32 = AtomicU32::new(0);
@@ -1029,14 +1064,19 @@ fn precompiled_compute(desc: *const PrecompiledCompute, iid: *const Iid, out: *m
     let parts = [&desc.settings, &desc.code, &desc.bindings].map(precompiled_part);
     let container = match &parts {
         [Some(settings), Some(code), Some(bindings)] => {
-            victory_shader::precompiled::compute_container(settings, code, bindings).map_err(|e| e.to_string())
+            victory_shader::precompiled::compute_container(settings, code, bindings)
+                .map_err(|e| e.to_string())
         }
         _ => Err("a part of the description is missing or not readable".to_owned()),
     };
     match container {
         Ok(container) => {
             if calls <= 4 || calls.is_power_of_two() {
-                tracing::info!(calls, code = desc.code.size, "precompiled compute pipeline (device method 0x218)");
+                tracing::info!(
+                    calls,
+                    code = desc.code.size,
+                    "precompiled compute pipeline (device method 0x218)"
+                );
             }
             hand_out(
                 vec![shader("compute", &container)],
@@ -1286,7 +1326,9 @@ mod tests {
     #[test]
     fn a_precompiled_compute_pipeline_keeps_its_program() {
         fn hex(s: &str) -> Vec<u8> {
-            (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+            (0..s.len() / 2)
+                .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+                .collect()
         }
         let settings = hex("00cf05400201096c00000000080008000100000043032c408a0b0000");
         // `s_mov_b32 s8, s4; s_mov_b32 s9, 0; s_load_dwordx8 s[16:23],
@@ -1302,11 +1344,17 @@ mod tests {
         }
         bindings.extend_from_slice(&0x43u32.to_le_bytes());
         bindings.extend_from_slice(&[0; 28]);
-        let part = |b: &[u8]| Bytecode { code: b.as_ptr(), size: b.len() };
+        let part = |b: &[u8]| Bytecode {
+            code: b.as_ptr(),
+            size: b.len(),
+        };
         let desc = PrecompiledCompute {
             root: std::ptr::null(),
             settings: part(&settings),
-            id: Bytecode { code: std::ptr::null(), size: 0 },
+            id: Bytecode {
+                code: std::ptr::null(),
+                size: 0,
+            },
             code: part(&code),
             bindings: part(&bindings),
             rest: [0; 4],
@@ -1314,15 +1362,22 @@ mod tests {
         let mut p = std::ptr::null();
         let hr = precompiled_compute(&desc, &PIPELINE_IIDS[0], &mut p);
         assert_eq!(hr, S_OK);
-        let [shader] = pipeline(p).shaders.as_slice() else { panic!("one shader") };
+        let [shader] = pipeline(p).shaders.as_slice() else {
+            panic!("one shader")
+        };
         assert_eq!(shader.stage, "compute");
         assert_eq!(group_size(p), Some([8, 8, 1]));
         let c = victory_shader::Container::parse(&shader.container).unwrap();
-        let programs = victory_shader::native_programs(c.part(victory_shader::FourCC::DXIL).unwrap().data).unwrap();
+        let programs =
+            victory_shader::native_programs(c.part(victory_shader::FourCC::DXIL).unwrap().data)
+                .unwrap();
         assert_eq!(programs[0].code, code);
         assert_eq!(programs[0].layout[0].user_data, 4);
         // A description whose binding table does not read fails, `out` null.
-        let desc = PrecompiledCompute { bindings: part(&settings), ..desc };
+        let desc = PrecompiledCompute {
+            bindings: part(&settings),
+            ..desc
+        };
         let mut q = std::ptr::dangling();
         let hr = precompiled_compute(&desc, &PIPELINE_IIDS[0], &mut q);
         assert_eq!(hr, E_INVALIDARG);

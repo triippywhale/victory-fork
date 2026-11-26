@@ -199,7 +199,16 @@ impl<C: Clone> Picked<C> {
     ) {
         self.forget(slot);
         self.note_entry(slot, entry);
-        self.slots.insert(slot, Slot { copy: key, from, to, record, unordered });
+        self.slots.insert(
+            slot,
+            Slot {
+                copy: key,
+                from,
+                to,
+                record,
+                unordered,
+            },
+        );
         let c = self.copies.entry(key).or_insert_with(|| Copy {
             copy: copy.clone(),
             slots: HashSet::new(),
@@ -260,7 +269,9 @@ impl<C: Clone> Picked<C> {
             }
             return spans
                 .into_iter()
-                .filter_map(|(key, (from, to))| Some((self.copies.get(&key)?.copy.clone(), from, to)))
+                .filter_map(|(key, (from, to))| {
+                    Some((self.copies.get(&key)?.copy.clone(), from, to))
+                })
                 .collect();
         }
         let slots = &self.slots;
@@ -322,7 +333,15 @@ mod tests {
             };
             let copy = slot / 4;
             let from = u64::from(slot) * 16;
-            p.keep(slot, copy as usize, &copy, [from, from + 16], record, entry(record), slot % 2 == 1);
+            p.keep(
+                slot,
+                copy as usize,
+                &copy,
+                [from, from + 16],
+                record,
+                entry(record),
+                slot % 2 == 1,
+            );
         }
         due
     }
@@ -361,7 +380,12 @@ mod tests {
         let mut heap = heap(8);
         let mut p = Picked::new(false);
         pass(&mut p, &heap, vec![], vec![]);
-        let span = |p: &mut Picked<u32>, copy: u32| p.spans().into_iter().find(|s| s.0 == copy).map(|s| (s.1, s.2));
+        let span = |p: &mut Picked<u32>, copy: u32| {
+            p.spans()
+                .into_iter()
+                .find(|s| s.0 == copy)
+                .map(|s| (s.1, s.2))
+        };
         assert_eq!(span(&mut p, 1), Some((64, 128)));
         heap.records.remove(&7);
         pass(&mut p, &heap, vec![7], vec![]);
@@ -385,7 +409,11 @@ mod tests {
         p.orphan(3, heap.record(3).unwrap(), None);
         for n in 1..FULL_EVERY {
             let due = p.plan(vec![], || vec![0, 1, 2, 3], |s| heap.record(s), entry);
-            let want: Vec<u32> = if n.is_multiple_of(ORPHANS_EVERY) { vec![3] } else { vec![] };
+            let want: Vec<u32> = if n.is_multiple_of(ORPHANS_EVERY) {
+                vec![3]
+            } else {
+                vec![]
+            };
             assert_eq!(due, want, "pass {n}");
         }
         let due = p.plan(vec![], || vec![0, 1, 2, 3], |s| heap.record(s), entry);
@@ -418,7 +446,11 @@ mod tests {
         let mut p: Picked<u32> = Picked::new(true);
         for n in 0..40u64 {
             let due = p.plan(vec![2], || vec![0, 1, 2, 3], |s| heap.record(s), entry);
-            let want: Vec<u32> = if n.is_multiple_of(ORPHANS_EVERY) { vec![0, 1, 2, 3] } else { vec![2] };
+            let want: Vec<u32> = if n.is_multiple_of(ORPHANS_EVERY) {
+                vec![0, 1, 2, 3]
+            } else {
+                vec![2]
+            };
             assert_eq!(due, want, "pass {n}");
         }
     }

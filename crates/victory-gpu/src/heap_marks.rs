@@ -76,7 +76,8 @@ impl Written {
 
     /// Forgets the slots not marked for [`KEEP_FRAMES`] frames.
     fn expire(&mut self, frame: u64) {
-        self.0.retain(|_, last| frame.saturating_sub(*last) <= KEEP_FRAMES);
+        self.0
+            .retain(|_, last| frame.saturating_sub(*last) <= KEEP_FRAMES);
     }
 
     fn has(&self, slot: u32) -> bool {
@@ -120,12 +121,16 @@ pub(crate) fn bind(list: &HostList) -> Option<u64> {
     if guard.is_none() {
         let bytes = u64::from(HEAP_MARKS_DWORDS) * 4;
         let (buffer, data) = host()?.shared_buffer(bytes)?;
-        crate::host::name(&buffer, || "marks of heap slots shaders store through".to_string());
+        crate::host::name(&buffer, || {
+            "marks of heap slots shaders store through".to_string()
+        });
         // SAFETY: a fresh mapping of at least that many bytes.
         unsafe { std::ptr::write_bytes(data, 0, bytes as usize) };
         // SAFETY: a live buffer.
         let gpu = unsafe { buffer.GetGPUVirtualAddress() };
-        tracing::info!("a shader stores through buffer views it picks from the view heap by index: the slots it marks are copied back");
+        tracing::info!(
+            "a shader stores through buffer views it picks from the view heap by index: the slots it marks are copied back"
+        );
         *guard = Some(Marks {
             buffer,
             data: data.cast(),
@@ -189,7 +194,15 @@ mod tests {
         assert_eq!(merged(vec![]), vec![]);
         assert_eq!(merged(vec![(8, 8), (4, 2)]), vec![]);
         assert_eq!(
-            merged(vec![(40, 50), (0, 10), (10, 20), (15, 18), (19, 30), (60, 70), (45, 61)]),
+            merged(vec![
+                (40, 50),
+                (0, 10),
+                (10, 20),
+                (15, 18),
+                (19, 30),
+                (60, 70),
+                (45, 61)
+            ]),
             vec![(0, 30), (40, 70)]
         );
     }

@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, IDXGIAdapter1, IDXGIFactory4,
+};
 use windows::core::{Error, Result, s};
 
 use super::*;
@@ -92,7 +94,9 @@ fn overlap(
                 Ok(())
             })
         });
-        ready.recv_timeout(WATCHDOG).expect("first request must miss and enter create");
+        ready
+            .recv_timeout(WATCHDOG)
+            .expect("first request must miss and enter create");
 
         let (send_progress, progress) = channel();
         let second = scope.spawn(move || {
@@ -125,7 +129,9 @@ fn concurrent_library_misses_are_serialized_by_name() {
     // SAFETY: plain DXGI queries against the selected D3D12 device.
     let adapter = unsafe {
         CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
-            .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter1>(host.device.GetAdapterLuid()))
+            .and_then(|factory| {
+                factory.EnumAdapterByLuid::<IDXGIAdapter1>(host.device.GetAdapterLuid())
+            })
             .and_then(|adapter| adapter.GetDesc1())
             .unwrap()
     };
@@ -148,8 +154,14 @@ fn concurrent_library_misses_are_serialized_by_name() {
         )
         .unwrap();
         let blob = blob.unwrap();
-        let bytes = std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize());
-        (host.device.CreateRootSignature::<ID3D12RootSignature>(0, bytes).unwrap(), bytes.to_vec())
+        let bytes =
+            std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize());
+        (
+            host.device
+                .CreateRootSignature::<ID3D12RootSignature>(0, bytes)
+                .unwrap(),
+            bytes.to_vec(),
+        )
     };
 
     let same = Compute::new(&root_blob, 1);
@@ -160,17 +172,23 @@ fn concurrent_library_misses_are_serialized_by_name() {
 
     // Use different host names that would share the old striped load lock.
     let old_stripe = |name: &str| {
-        name.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(usize::from(b))) % 64
+        name.bytes().fold(0usize, |h, b| {
+            h.wrapping_mul(31).wrapping_add(usize::from(b))
+        }) % 64
     };
     let first = Compute::new(&root_blob, 2);
     let second = (3..1024)
         .map(|threads| Compute::new(&root_blob, threads))
-        .find(|other| other.name != first.name && old_stripe(&other.name) == old_stripe(&first.name))
+        .find(|other| {
+            other.name != first.name && old_stripe(&other.name) == old_stripe(&first.name)
+        })
         .expect("different name with the same old stripe");
     let before = library.added.load(Ordering::Relaxed);
     let distinct_result = overlap(host, &root, &first, &second);
     let distinct_stores = library.added.load(Ordering::Relaxed) - before;
-    println!("distinct names on the same old stripe: {distinct_result:?}, successful stores={distinct_stores}");
+    println!(
+        "distinct names on the same old stripe: {distinct_result:?}, successful stores={distinct_stores}"
+    );
 
     let retry = Compute::new(&root_blob, 1024);
     let failed = retry.request(host, &root, || Err(Error::from_hresult(E_FAIL)));

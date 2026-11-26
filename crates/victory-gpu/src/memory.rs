@@ -317,7 +317,9 @@ impl Memory {
 
     /// Whether copy `n` is one shaders wrote lately.
     fn written_lately(&self, n: usize, frame: u64) -> bool {
-        self.marked.get(n).is_some_and(|&(marked, _)| marked != u64::MAX && frame.wrapping_sub(marked) <= MARK_FRAMES)
+        self.marked.get(n).is_some_and(|&(marked, _)| {
+            marked != u64::MAX && frame.wrapping_sub(marked) <= MARK_FRAMES
+        })
     }
 
     /// What a dispatch names: the copy around `address` and the 4 MiB
@@ -531,8 +533,14 @@ pub(crate) fn empty(list: &HostList, heap: &HostHeap) -> Option<Ready> {
     let (base, _) = m.run(heap)?;
     if m.unbuilt.is_none() {
         m.unbuilt = Some([
-            zeroed(u64::from(MEMORY_PAGES) * 2, "directory of unbuilt structures")?,
-            zeroed(u64::from(MEMORY_FAULTS + MEMORY_MARKS), "faults of unbuilt structures")?,
+            zeroed(
+                u64::from(MEMORY_PAGES) * 2,
+                "directory of unbuilt structures",
+            )?,
+            zeroed(
+                u64::from(MEMORY_FAULTS + MEMORY_MARKS),
+                "faults of unbuilt structures",
+            )?,
         ]);
     }
     let [directory, faults] = m.unbuilt.as_ref()?;
@@ -568,7 +576,14 @@ mod tests {
         // (48 bytes): no transform, index and vertex formats, counts, the
         // index buffer, the vertex buffer and its stride.
         let mut record = Vec::new();
-        for v in [0u64, 0x10_0000_0035, 0x508_0000_1263, 0xb_13f6_53a0, 0xb_13f0_8bc0, 8] {
+        for v in [
+            0u64,
+            0x10_0000_0035,
+            0x508_0000_1263,
+            0xb_13f6_53a0,
+            0xb_13f0_8bc0,
+            8,
+        ] {
             record.extend_from_slice(&v.to_le_bytes());
         }
         let found: Vec<u64> = title_addresses(&record).collect();
@@ -636,7 +651,11 @@ mod tests {
                 // A triangle of three equal points (the node a zero
                 // pointer names), an instance or a procedural node.
                 for kind in [0, 1, 2, 3, 6, 7] {
-                    assert_eq!(intersect(&zeros, kind, ray, sort), MISS.map(f32::to_bits), "kind {kind}");
+                    assert_eq!(
+                        intersect(&zeros, kind, ray, sort),
+                        MISS.map(f32::to_bits),
+                        "kind {kind}"
+                    );
                 }
                 // A box node of zeros: its children are the zero pointer,
                 // that triangle again.

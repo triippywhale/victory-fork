@@ -281,7 +281,11 @@ pub(crate) fn target_format(format: u32) -> u32 {
                     | D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0;
                 let refused = asked.is_err() || support.Support1.0 & both != both;
                 if refused {
-                    tracing::info!(format = f, stand_in = to, "the host does not render to this format: a stand-in is used");
+                    tracing::info!(
+                        format = f,
+                        stand_in = to,
+                        "the host does not render to this format: a stand-in is used"
+                    );
                 }
                 refused
             })
@@ -1338,7 +1342,11 @@ pub(crate) fn host_waits(this: This) -> bool {
     let refused = r.host.refused.load(std::sync::atomic::Ordering::Relaxed);
     r.desc.dimension != BUFFER
         && refused != REFUSED_FOR_GOOD
-        && r.host.made.lock().unwrap_or_else(|e| e.into_inner()).is_none()
+        && r.host
+            .made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
 }
 
 /// The host side of title texture `this`: made now if it is not there and
@@ -1476,7 +1484,15 @@ pub(crate) fn room() -> bool {
         Some([budget, used, shared_budget, shared_used]) => {
             let reserve = crate::shadow::card_reserve();
             under_share(budget, used, reserve, room_percent())
-                || texture_spill() && spill_room(budget, used, reserve, room_percent(), shared_budget, shared_used)
+                || texture_spill()
+                    && spill_room(
+                        budget,
+                        used,
+                        reserve,
+                        room_percent(),
+                        shared_budget,
+                        shared_used,
+                    )
         }
         None => filled < WITHOUT_BUDGET,
     }
@@ -1500,8 +1516,16 @@ fn texture_spill() -> bool {
 /// [`texture_spill`]'s rule: what the card and the shared memory hold
 /// together (the card's use with `reserve` counted as used) stays under the
 /// card's share plus half the shared budget; the other half is the title's.
-fn spill_room(budget: u64, used: u64, reserve: u64, percent: u64, shared_budget: u64, shared_used: u64) -> bool {
-    used.saturating_add(reserve).saturating_add(shared_used) < (budget / 100 * percent).saturating_add(shared_budget / 2)
+fn spill_room(
+    budget: u64,
+    used: u64,
+    reserve: u64,
+    percent: u64,
+    shared_budget: u64,
+    shared_used: u64,
+) -> bool {
+    used.saturating_add(reserve).saturating_add(shared_used)
+        < (budget / 100 * percent).saturating_add(shared_budget / 2)
 }
 
 /// Whether the card's memory in use, with `reserve` bytes kept for copies
@@ -1544,7 +1568,9 @@ pub(crate) fn placed_known(address: u64, desc: &[u32; 14]) -> Option<This> {
     key[1] = 0;
     key[13] = 0;
     let map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
-    map.get(&(address, key)).or_else(|| map.get(&(address, *desc))).map(|&r| r as This)
+    map.get(&(address, key))
+        .or_else(|| map.get(&(address, *desc)))
+        .map(|&r| r as This)
 }
 
 /// For the card accounting line: whether title texture `this` has a host
@@ -1566,7 +1592,11 @@ pub(crate) fn copy_state(this: This) -> Option<(u8, u64, u64)> {
     let made = r.host.made.lock().unwrap_or_else(|e| e.into_inner());
     Some(match made.as_ref() {
         Some((host, _)) => (2, host.bytes, memory),
-        None => (u8::from(r.host.gone.load(Relaxed)), footprint(&r.desc).map_or(0, |f| f.size), memory),
+        None => (
+            u8::from(r.host.gone.load(Relaxed)),
+            footprint(&r.desc).map_or(0, |f| f.size),
+            memory,
+        ),
     })
 }
 
@@ -1596,12 +1626,18 @@ pub(crate) fn copy_state(this: This) -> Option<(u8, u64, u64)> {
 /// one that is not. Not measured: a tenth to half a second is expected,
 /// and the line says what it took. No line is begun while one is walking.
 #[cfg(windows)]
-pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>, gone: Vec<(u64, u64)>) {
+pub(crate) fn card_accounting(
+    room: bool,
+    due: [u64; 5],
+    never: Vec<(u64, u64)>,
+    gone: Vec<(u64, u64)>,
+) {
     use std::sync::atomic::Ordering::Relaxed;
     static WALKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     // Host copies let go and their bytes, made again and their bytes, and
     // made in all, at the line before.
-    static BEFORE: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+    static BEFORE: [std::sync::atomic::AtomicU64; 5] =
+        [const { std::sync::atomic::AtomicU64::new(0) }; 5];
     if WALKING.swap(true, Relaxed) {
         return;
     }
@@ -1626,7 +1662,11 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
     }
     let kinds = KINDS.each_ref().map(|k| k.load(Relaxed));
     let mut since = [0u64; 5];
-    for ((slot, now), before) in since.iter_mut().zip([kinds[2], kinds[3], kinds[4], kinds[5], kinds[6]]).zip(&BEFORE) {
+    for ((slot, now), before) in since
+        .iter_mut()
+        .zip([kinds[2], kinds[3], kinds[4], kinds[5], kinds[6]])
+        .zip(&BEFORE)
+    {
         *slot = now.saturating_sub(before.swap(now, Relaxed));
     }
     let video = crate::host::host().and_then(|h| h.video_memory());
@@ -1647,7 +1687,9 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
                 c[6] += 1;
                 continue;
             };
-            if layout.size == 0 || crate::texture::committed(memory as *const u8, layout.size as usize) {
+            if layout.size == 0
+                || crate::texture::committed(memory as *const u8, layout.size as usize)
+            {
                 continue;
             }
             c[3] += 1;
@@ -1665,7 +1707,11 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
             let all: u64 = mips.iter().map(texels).sum::<u64>().max(1);
             let (mut missing, mut any) = (0u64, false);
             for (level, m) in mips.iter().enumerate().take(tail) {
-                let end = if level == 0 { layout.slice_size } else { mips[level - 1].offset };
+                let end = if level == 0 {
+                    layout.slice_size
+                } else {
+                    mips[level - 1].offset
+                };
                 if end <= m.offset {
                     continue;
                 }
@@ -1709,15 +1755,54 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
         };
         let (never, gone) = (mapped(&never), mapped(&gone));
         let [budget_mb, used_mb] = video.map_or([0, 0], |v| [v[0] >> 20, v[1] >> 20]);
-        let [copies_n, copies_mb, unmapped_mb, partly, largest, nothing, unknown] =
-            [c[0], c[1] >> 20, c[2] >> 20, c[3], c[4], c[5], c[6]];
+        let [
+            copies_n,
+            copies_mb,
+            unmapped_mb,
+            partly,
+            largest,
+            nothing,
+            unknown,
+        ] = [c[0], c[1] >> 20, c[2] >> 20, c[3], c[4], c[5], c[6]];
         let [without_never, without_gone] = without;
-        let [due_slots, due_uploaded, due_other, alive_n, alive_mb] = [due[0], due[1], due[2], due[3], due[4] >> 20];
-        let [never_n, never_mb, never_whole, never_whole_mb, never_part, never_part_mb, never_none] =
-            [never[0], never[1] >> 20, never[2], never[3] >> 20, never[4], never[5] >> 20, never[6]];
-        let [gone_n, gone_mb, gone_whole, gone_whole_mb, gone_part, gone_part_mb, gone_none] =
-            [gone[0], gone[1] >> 20, gone[2], gone[3] >> 20, gone[4], gone[5] >> 20, gone[6]];
-        let [let_go, let_go_mb, again, again_mb, made] = [since[0], since[1] >> 20, since[2], since[3] >> 20, since[4]];
+        let [due_slots, due_uploaded, due_other, alive_n, alive_mb] =
+            [due[0], due[1], due[2], due[3], due[4] >> 20];
+        let [
+            never_n,
+            never_mb,
+            never_whole,
+            never_whole_mb,
+            never_part,
+            never_part_mb,
+            never_none,
+        ] = [
+            never[0],
+            never[1] >> 20,
+            never[2],
+            never[3] >> 20,
+            never[4],
+            never[5] >> 20,
+            never[6],
+        ];
+        let [
+            gone_n,
+            gone_mb,
+            gone_whole,
+            gone_whole_mb,
+            gone_part,
+            gone_part_mb,
+            gone_none,
+        ] = [
+            gone[0],
+            gone[1] >> 20,
+            gone[2],
+            gone[3] >> 20,
+            gone[4],
+            gone[5] >> 20,
+            gone[6],
+        ];
+        let [let_go, let_go_mb, again, again_mb, made] =
+            [since[0], since[1] >> 20, since[2], since[3] >> 20, since[4]];
         let walk_ms = began.elapsed().as_millis() as u64;
         tracing::info!(
             "card accounting: room {room}, the card {used_mb} MB in use of a budget of {budget_mb} MB; host copies of textures the title \
@@ -1733,7 +1818,11 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
         );
         WALKING.store(false, Relaxed);
     };
-    if std::thread::Builder::new().name("card accounting".into()).spawn(walk).is_err() {
+    if std::thread::Builder::new()
+        .name("card accounting".into())
+        .spawn(walk)
+        .is_err()
+    {
         WALKING.store(false, Relaxed);
     }
 }
@@ -1856,7 +1945,9 @@ pub(crate) fn census() -> [u64; 10] {
                     placed_filled += 1;
                     // Its first page: a texture's smallest mips lie there,
                     // and are mapped first and unmapped last.
-                    if placed_filled.is_multiple_of(EVERY) && !crate::texture::committed(r.data().cast_const(), 1) {
+                    if placed_filled.is_multiple_of(EVERY)
+                        && !crate::texture::committed(r.data().cast_const(), 1)
+                    {
                         count[8] += host.bytes * EVERY;
                         if crate::host::references(&host.texture) > 1 {
                             count[9] += host.bytes * EVERY;
@@ -1888,13 +1979,18 @@ fn host_bytes(texture: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) ->
     // SAFETY: plain queries on a live resource and device.
     unsafe {
         let desc = texture.GetDesc();
-        host.device.GetResourceAllocationInfo(0, &[desc]).SizeInBytes
+        host.device
+            .GetResourceAllocationInfo(0, &[desc])
+            .SizeInBytes
     }
 }
 
 #[cfg(windows)]
 impl HostTexture {
-    fn new(texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource, state: u32) -> HostTexture {
+    fn new(
+        texture: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        state: u32,
+    ) -> HostTexture {
         use std::sync::atomic::Ordering::Relaxed;
         let bytes = host_bytes(&texture);
         HOST_TEXTURES[0].fetch_add(1, Relaxed);
@@ -1925,7 +2021,10 @@ impl Drop for HostTexture {
 /// (never released), for the memory line.
 #[cfg(all(windows, feature = "diagnostics"))]
 pub(crate) fn placed_textures() -> u64 {
-    PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner()).len() as u64
+    PLACED_TEXTURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len() as u64
 }
 
 /// Moves the host texture to `wanted` (a host texture state); the host
@@ -2122,7 +2221,10 @@ fn host_texture(
     }
     let texture = texture.ok_or(None)?;
     crate::host::name(&texture, || {
-        format!("texture {}x{} f{} flags {:#x}", d.width, d.height, d.format, d.flags)
+        format!(
+            "texture {}x{} f{} flags {:#x}",
+            d.width, d.height, d.format, d.flags
+        )
     });
     Ok(texture)
 }
@@ -2483,7 +2585,9 @@ pub(crate) fn texture_at_made(address: u64, desc: &[u32; 14]) -> Option<This> {
     key[1] = 0;
     key[13] = 0;
     let map = PLACED_TEXTURES.lock().unwrap_or_else(|e| e.into_inner());
-    let found = map.get(&(address, key)).or_else(|| map.get(&(address, *desc)))?;
+    let found = map
+        .get(&(address, key))
+        .or_else(|| map.get(&(address, *desc)))?;
     Some(*found as This)
 }
 
@@ -2515,12 +2619,14 @@ pub(crate) fn texture_at(address: u64, desc: &[u32; 14]) -> Option<This> {
     if raw != key {
         let mut seen = PLACED_RAW.lock().unwrap_or_else(|e| e.into_inner());
         if seen.insert((address, raw)) {
-            let others = seen.range((address, [0; 14])..=(address, [u32::MAX; 14])).filter(|(_, r)| {
-                let mut blank = *r;
-                blank[1] = 0;
-                blank[13] = 0;
-                blank == key
-            });
+            let others = seen
+                .range((address, [0; 14])..=(address, [u32::MAX; 14]))
+                .filter(|(_, r)| {
+                    let mut blank = *r;
+                    blank[1] = 0;
+                    blank[13] = 0;
+                    blank == key
+                });
             if others.count() > 1 {
                 PLACED_TWINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
@@ -2597,7 +2703,8 @@ pub(crate) fn uav_texture_at(address: u64, desc: &[u32; 14], view_format: u32) -
             let w_fmt = target_format(wanted);
             let typeless = family(o_fmt) == o_fmt && family(o_fmt + 1) == o_fmt;
             let srgb = SRGB.iter().any(|&(s, _)| s == o_fmt);
-            let compatible = o_fmt == w_fmt || ((typeless || srgb) && family(w_fmt) == family(o_fmt));
+            let compatible =
+                o_fmt == w_fmt || ((typeless || srgb) && family(w_fmt) == family(o_fmt));
             if o.desc.dimension == d.dimension
                 && o.desc.width == d.width
                 && o.desc.height == d.height
@@ -2883,11 +2990,39 @@ mod tests {
         // The card's 90% (5,400 MB) reached, nothing shared in use: room.
         assert!(super::spill_room(budget, 5_600 * MB, 0, 90, shared, 0));
         // Card share plus half the shared budget (9,400 MB) reached: none.
-        assert!(!super::spill_room(budget, 5_600 * MB, 0, 90, shared, 3_800 * MB));
-        assert!(super::spill_room(budget, 5_600 * MB, 0, 90, shared, 3_700 * MB));
+        assert!(!super::spill_room(
+            budget,
+            5_600 * MB,
+            0,
+            90,
+            shared,
+            3_800 * MB
+        ));
+        assert!(super::spill_room(
+            budget,
+            5_600 * MB,
+            0,
+            90,
+            shared,
+            3_700 * MB
+        ));
         // The reserve for card copies counts as used.
-        assert!(!super::spill_room(budget, 5_600 * MB, 200 * MB, 90, shared, 3_700 * MB));
-        assert!(!super::spill_room(budget, u64::MAX, u64::MAX, 90, u64::MAX, u64::MAX));
+        assert!(!super::spill_room(
+            budget,
+            5_600 * MB,
+            200 * MB,
+            90,
+            shared,
+            3_700 * MB
+        ));
+        assert!(!super::spill_room(
+            budget,
+            u64::MAX,
+            u64::MAX,
+            90,
+            u64::MAX,
+            u64::MAX
+        ));
     }
 
     use super::*;
@@ -4057,7 +4192,9 @@ float4 lit() : SV_Target { return 1.0; }
         };
         let state = host_copy(depth).unwrap().state.load(Relaxed);
         let state = D3D12_RESOURCE_STATES(state as i32);
-        let colour = host.rtv(Some(&target), None).expect("RTV for render target");
+        let colour = host
+            .rtv(Some(&target), None)
+            .expect("RTV for render target");
         let depth_view = host.dsv(
             host_depth,
             Some(&D3D12_DEPTH_STENCIL_VIEW_DESC {
